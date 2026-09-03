@@ -1,0 +1,59 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { plainToInstance } from 'class-transformer';
+import { Platform } from '@/common/interfaces/pr-review.interfaces';
+import { PrismaService } from '@/database/prisma.service';
+import { SyncCoordinatorService } from '@/common/services/sync-coordinator.service';
+import { PullRequestResponseDto } from './dto/pull-request-response.dto';
+
+@Injectable()
+export class PullRequestsService {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly syncCoordinator: SyncCoordinatorService,
+  ) { }
+
+  async findAllForUser(userId: string): Promise<PullRequestResponseDto[]> {
+    await this.syncCoordinator.ensureFresh(userId);
+
+    const pullRequests = await this.prisma.pullRequest.findMany({
+      where: { userId }, // ownership enforced at the query level, always
+      include: { _count: { select: { reviews: true } } },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return plainToInstance(PullRequestResponseDto, pullRequests, {
+      excludeExtraneousValues: true,
+    });
+  }
+
+  async findOneForUser(userId: string, pullRequestId: string): Promise<PullRequestResponseDto> {
+    await this.syncCoordinator.ensureFresh(userId);
+
+    const pullRequest = await this.prisma.pullRequest.findFirst({
+      where: {
+        id: pullRequestId,
+        userId, // never trust an id alone — always scope to the authenticated user
+      },
+      include: { _count: { select: { reviews: true } } },
+    });
+
+    if (!pullRequest) {
+      throw new NotFoundException('Pull request not found');
+    }
+
+    return plainToInstance(PullRequestResponseDto, pullRequest, {
+      excludeExtraneousValues: true,
+    });
+  }
+
+  /** Verifies ownership and returns the raw entity — used internally by ReviewsService too. */
+  async getOwnedPullRequestOrThrow(userId: string, pullRequestId: string) {
+    const pullRequest = await this.prisma.pullRequest.findFirst({
+      where: { id: pullRequestId, userId },
+    });
+    if (!pullRequest) {
+      throw new NotFoundException('Pull request not found');
+    }
+    return pullRequest;
+  }
+}

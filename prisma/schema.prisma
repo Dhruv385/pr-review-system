@@ -1,0 +1,119 @@
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+enum Platform {
+    GITHUB
+    GITLAB
+}
+
+enum PullRequestStatus {
+    OPEN
+    CLOSED
+    MERGED
+}
+
+enum ReviewState {
+    APPROVED
+    CHANGES_REQUESTED
+    COMMENTED
+    PENDING
+    DISMISSED
+}
+
+model User {
+    id               String         @id @default(cuid())
+    email            String         @unique
+    passwordHash     String
+    platform         Platform
+    platformUsername String
+    name             String?
+    githubAccount    GithubAccount?
+    gitlabAccount    GitlabAccount?
+    pullRequests     PullRequest[]
+    createdAt        DateTime       @default(now())
+    updatedAt        DateTime       @updatedAt
+
+    @@unique([platform, platformUsername])
+}
+
+model GithubAccount {
+    id           String   @id @default(cuid())
+    userId       String   @unique
+    githubId     String   @unique
+    username     String
+    accessToken  String
+    tokenRevoked Boolean  @default(false)
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@map("github_accounts")
+}
+
+model GitlabAccount {
+    id           String   @id @default(cuid())
+    userId       String   @unique
+    gitlabId     String   @unique
+    username     String
+    accessToken  String
+    tokenRevoked Boolean  @default(false)
+    createdAt    DateTime @default(now())
+    updatedAt    DateTime @updatedAt
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@map("gitlab_accounts")
+}
+
+model PullRequest {
+    id                 String            @id @default(cuid())
+    userId             String
+    externalId         String
+    platform           Platform
+    number             Int
+    title              String
+    description        String?
+    repositoryId       String
+    repositoryName     String
+    repositoryFullName String
+    status             PullRequestStatus
+    authorName         String
+    url                String
+    lastSyncedAt       DateTime?
+    createdAt          DateTime          @default(now())
+    updatedAt          DateTime          @updatedAt
+
+    user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+    reviews Review[]
+
+    @@unique([userId, platform, externalId], name: "userId_platform_externalId")
+    @@index([userId])
+    @@index([userId, platform])
+    @@map("pull_requests")
+}
+
+model Review {
+    id                String      @id @default(cuid())
+    externalId        String
+    pullRequestId     String
+    reviewerName      String
+    reviewerAvatarUrl String?
+    state             ReviewState
+    comment           String?
+    submittedAt       DateTime?
+    createdAt         DateTime    @default(now())
+    updatedAt         DateTime    @updatedAt
+
+    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+
+    @@unique([pullRequestId, externalId], name: "pullRequestId_externalId")
+    @@index([pullRequestId])
+    @@map("reviews")
+}

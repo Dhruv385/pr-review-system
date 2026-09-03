@@ -1,0 +1,53 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pr-review-agent-api
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DATABASE_URL is in .env (typically "localhost",
+      # for running the app outside Docker) - inside the compose network the
+      # Postgres container is reachable at the service name "postgres", not
+      # localhost.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '${API_HOST_PORT:-3000}:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    command: [ 'sh', '-c', 'npm run prisma:deploy && node dist/main.js' ]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pr-review-agent-postgres2
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER} 
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - '${POSTGRES_HOST_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ 'CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"' ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pr-review-agent-redis
+    ports:
+      - '${REDIS_HOST_PORT:-6379}:6379'
+    command: [ 'redis-server', '--appendonly', 'yes' ]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  postgres-data:
+  redis-data:
