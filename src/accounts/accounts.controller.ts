@@ -1,6 +1,5 @@
-import { Controller, Get, Query, Res, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiBearerAuth } from '@nestjs/swagger';
-import { Response } from 'express';
 import { JwtAuthGuard } from '@/auth/jwt-auth.guard';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { IUser } from '@/common/interfaces/pr-review.interfaces';
@@ -18,8 +17,9 @@ export class AccountsController {
   ) { }
 
   // GET /accounts/github/connect  (JWT-protected: this is where we know who's connecting)
-  // Returns the authorization URL as JSON — the frontend owns the actual
-  // browser navigation to it, this API never redirects.
+  // Returns the authorization URL as JSON — the caller is responsible for
+  // opening it in a browser (never fetch() it; GitHub doesn't send CORS
+  // headers back, so a fetch that follows the redirect will be blocked).
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get the GitHub OAuth authorization URL to redirect the user to' })
   @ApiResponse({ status: 200, description: 'Returns the GitHub authorization URL' })
@@ -36,18 +36,17 @@ export class AccountsController {
   @ApiOperation({ summary: 'GitHub OAuth callback handler' })
   @ApiQuery({ name: 'code', description: 'Authorization code from GitHub' })
   @ApiQuery({ name: 'state', description: 'OAuth state token for security' })
-  @ApiResponse({ status: 302, description: 'Redirects back into the dashboard once connected' })
+  @ApiResponse({ status: 200, description: 'GitHub account connected successfully' })
   @ApiResponse({ status: 401, description: 'OAuth state is missing, expired, or already used' })
   @Get('github/callback')
-  async githubCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
+  async githubCallback(@Query('code') code: string, @Query('state') state: string) {
     const userId = await this.oauthState.consumeState(state);
     const result = await this.githubAuth.connectAccount(userId, code);
-    return res.redirect(`/?connected=github&username=${encodeURIComponent(result.username)}`);
+    return { connected: true, provider: 'GITHUB', username: result.username };
   }
 
   // ---- GitLab ----
 
-  // Same pattern as GitHub above — JSON only, frontend does the navigation.
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get the GitLab OAuth authorization URL to redirect the user to' })
   @ApiResponse({ status: 200, description: 'Returns the GitLab authorization URL' })
@@ -63,12 +62,12 @@ export class AccountsController {
   @ApiOperation({ summary: 'GitLab OAuth callback handler' })
   @ApiQuery({ name: 'code', description: 'Authorization code from GitLab' })
   @ApiQuery({ name: 'state', description: 'OAuth state token for security' })
-  @ApiResponse({ status: 302, description: 'Redirects back into the dashboard once connected' })
+  @ApiResponse({ status: 200, description: 'GitLab account connected successfully' })
   @ApiResponse({ status: 401, description: 'OAuth state is missing, expired, or already used' })
   @Get('gitlab/callback')
-  async gitlabCallback(@Query('code') code: string, @Query('state') state: string, @Res() res: Response) {
+  async gitlabCallback(@Query('code') code: string, @Query('state') state: string) {
     const userId = await this.oauthState.consumeState(state);
     const result = await this.gitlabAuth.connectAccount(userId, code);
-    return res.redirect(`/?connected=gitlab&username=${encodeURIComponent(result.username)}`);
+    return { connected: true, provider: 'GITLAB', username: result.username };
   }
 }

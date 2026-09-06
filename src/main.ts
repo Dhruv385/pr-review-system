@@ -1,14 +1,12 @@
-import { join } from 'path';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
-import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
-    const app = await NestFactory.create<NestExpressApplication>(AppModule);
+    const app = await NestFactory.create(AppModule);
 
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
@@ -16,10 +14,6 @@ async function bootstrap() {
     // logging (requestId, userId, method, path, statusCode, durationMs).
     app.useGlobalFilters(new AllExceptionsFilter());
     app.useGlobalInterceptors(new LoggingInterceptor());
-
-    // Static dashboard UI (public/) — served from the same origin as the API,
-    // so it never needs CORS or a separate frontend dev server.
-    app.useStaticAssets(join(__dirname, '..', 'public'));
 
     const configuredOrigins = (process.env.CORS_ORIGINS ?? '')
         .split(',')
