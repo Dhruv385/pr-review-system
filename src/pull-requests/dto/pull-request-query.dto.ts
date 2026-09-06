@@ -1,4 +1,5 @@
-import { IsIn, IsOptional } from 'class-validator';
+import { IsBoolean, IsIn, IsOptional } from 'class-validator';
+import { Transform } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class PullRequestQueryDto {
@@ -6,4 +7,14 @@ export class PullRequestQueryDto {
   @IsOptional()
   @IsIn(['GITHUB', 'GITLAB'])
   platform?: 'GITHUB' | 'GITLAB';
+
+  @ApiProperty({
+    required: false,
+    description: 'Bypass the staleness check and sync against GitHub/GitLab immediately, regardless of PR_SYNC_STALE_MINUTES',
+    example: true,
+  })
+  @IsOptional()
+  @Transform(({ value }) => value === true || value === 'true')
+  @IsBoolean()
+  forceSync?: boolean;
 }

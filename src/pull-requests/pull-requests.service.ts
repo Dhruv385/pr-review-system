@@ -12,8 +12,8 @@ export class PullRequestsService {
     private readonly syncCoordinator: SyncCoordinatorService,
   ) { }
 
-  async findAllForUser(userId: string, platform?: Platform): Promise<PullRequestResponseDto[]> {
-    await this.syncCoordinator.ensureFresh(userId);
+  async findAllForUser(userId: string, platform?: Platform, forceSync = false): Promise<PullRequestResponseDto[]> {
+    await this.syncCoordinator.ensureFresh(userId, forceSync);
 
     const pullRequests = await this.prisma.pullRequest.findMany({
       where: { userId, ...(platform ? { platform } : {}) }, // ownership enforced at the query level, always
