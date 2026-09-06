@@ -12,11 +12,11 @@ export class PullRequestsService {
     private readonly syncCoordinator: SyncCoordinatorService,
   ) { }
 
-  async findAllForUser(userId: string): Promise<PullRequestResponseDto[]> {
+  async findAllForUser(userId: string, platform?: Platform): Promise<PullRequestResponseDto[]> {
     await this.syncCoordinator.ensureFresh(userId);
 
     const pullRequests = await this.prisma.pullRequest.findMany({
-      where: { userId }, // ownership enforced at the query level, always
+      where: { userId, ...(platform ? { platform } : {}) }, // ownership enforced at the query level, always
       include: { _count: { select: { reviews: true } } },
       orderBy: { updatedAt: 'desc' },
     });

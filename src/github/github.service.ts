@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { Platform, PullRequestStatus, ReviewState } from '@/common/interfaces/pr-review.interfaces';
 import { PrismaService } from '@/database/prisma.service';
 import { GithubAuthService } from './github-auth.service';
@@ -26,6 +26,21 @@ export class GithubService {
     const accessToken = await this.githubAuth.getDecryptedToken(userId);
     if (!accessToken) return false;
 
+    try {
+      await this.runSync(userId, accessToken);
+    } catch (err) {
+      if (err instanceof UnauthorizedException) {
+        // Token is dead (revoked/expired) — stop hammering GitHub's API on
+        // every subsequent request until the user reconnects their account.
+        await this.prisma.githubAccount.update({ where: { userId }, data: { tokenRevoked: true } });
+      }
+      throw err;
+    }
+
+    return true;
+  }
+
+  private async runSync(userId: string, accessToken: string): Promise<void> {
     const repos = await this.githubApi.listAccessibleRepos(accessToken);
 
     // Repos processed with limited concurrency to respect rate limits.
@@ -46,7 +61,6 @@ export class GithubService {
     });
 
     this.logger.log(`GitHub sync complete for user ${userId}: ${repos.length} repos processed`);
-    return true;
   }
 
   private normalizePullRequest(

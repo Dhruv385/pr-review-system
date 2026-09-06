@@ -3,12 +3,12 @@ import { HttpModule } from '@nestjs/axios';
 import { GitlabAuthService } from './gitlab-auth.service';
 import { GitlabApiClient } from './gitlab-api.client';
 import { GitlabService } from './gitlab.service';
-import { CryptoService } from '@/common/services/crypto.service';
-import { PrismaService } from '@/database/prisma.service';
+import { CommonModule } from '@/common/common.module';
+import { DatabaseModule } from '@/database/database.module';
 
 @Module({
-  imports: [HttpModule],
-  providers: [PrismaService, GitlabAuthService, GitlabApiClient, GitlabService, CryptoService],
-  exports: [GitlabAuthService, GitlabService, PrismaService],
+  imports: [HttpModule, DatabaseModule, CommonModule],
+  providers: [GitlabAuthService, GitlabApiClient, GitlabService],
+  exports: [GitlabAuthService, GitlabService],
 })
 export class GitlabModule { }
