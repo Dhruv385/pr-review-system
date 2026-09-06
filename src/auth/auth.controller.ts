@@ -14,9 +14,13 @@ export class AuthController {
         private readonly authService: AuthService,
     ) { }
 
-    @ApiOperation({ summary: 'Register a new account and receive an access token' })
+    @ApiOperation({
+        summary: 'Register a new account and receive an access token',
+        description: 'Email must be unique; platform + username together must also be unique (one account per platform identity).',
+    })
     @ApiResponse({ status: 201, description: 'Account created; access token returned' })
-    @ApiResponse({ status: 409, description: 'An account with this email already exists' })
+    @ApiResponse({ status: 400, description: 'Validation failed (e.g. invalid email, password under 8 characters)' })
+    @ApiResponse({ status: 409, description: 'This email or platform username is already registered to another account' })
     @ApiResponse({ status: 429, description: 'Too many registration attempts — try again shortly' })
     @Throttle({ auth: { limit: 5, ttl: 60_000 } })
     @UseGuards(ThrottlerGuard)
@@ -25,8 +29,9 @@ export class AuthController {
         return this.authService.register(dto);
     }
 
-    @ApiOperation({ summary: 'Log in and receive an access token' })
+    @ApiOperation({ summary: 'Log in with email and password to receive an access token' })
     @ApiResponse({ status: 200, description: 'Access token returned' })
+    @ApiResponse({ status: 400, description: 'Validation failed (missing email or password)' })
     @ApiResponse({ status: 401, description: 'Invalid email or password' })
     @ApiResponse({ status: 429, description: 'Too many login attempts — try again shortly' })
     @Throttle({ auth: { limit: 10, ttl: 60_000 } })

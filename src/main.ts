@@ -1,12 +1,25 @@
+import { join } from 'path';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
-    const app = await NestFactory.create(AppModule);
+    const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+
+    // Consistent, safe error shape for every response + structured per-request
+    // logging (requestId, userId, method, path, statusCode, durationMs).
+    app.useGlobalFilters(new AllExceptionsFilter());
+    app.useGlobalInterceptors(new LoggingInterceptor());
+
+    // Static dashboard UI (public/) — served from the same origin as the API,
+    // so it never needs CORS or a separate frontend dev server.
+    app.useStaticAssets(join(__dirname, '..', 'public'));
 
     const configuredOrigins = (process.env.CORS_ORIGINS ?? '')
         .split(',')
@@ -30,12 +43,20 @@ async function bootstrap() {
     // Swagger configuration
     const config = new DocumentBuilder()
         .setTitle('PR Review System API')
-        .setDescription('GitHub and GitLab Pull Request Review Management API')
+        .setDescription(
+            'GitHub and GitLab Pull Request review management, with AI-assisted code review.\n\n' +
+            '**Typical flow:** `POST /auth/register` (or `/auth/login`) → copy the returned ' +
+            '`accessToken` into the Authorize button below → `GET /accounts/{provider}/connect` to ' +
+            'get an OAuth URL, open it in a browser to link your account → `GET /pull-requests` to ' +
+            'sync and list your PRs.\n\n' +
+            'Every error response follows the same shape: `{ statusCode, error, message, timestamp, path }`.',
+        )
         .setVersion('1.0.0')
         .addBearerAuth()
-        .addTag('Accounts', 'OAuth authentication and account management')
-        .addTag('Pull Requests', 'Pull request retrieval and management')
-        .addTag('Reviews', 'Code review retrieval and management')
+        .addTag('Authentication', 'Register, log in, and verify access tokens')
+        .addTag('Accounts', 'OAuth account linking for GitHub and GitLab')
+        .addTag('Pull Requests', 'Pull request retrieval, sync, and AI-assisted review')
+        .addTag('Reviews', 'Code review retrieval')
         .build();
 
     const document = SwaggerModule.createDocument(app, config);

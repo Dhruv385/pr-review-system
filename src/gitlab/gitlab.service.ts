@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { Platform, PullRequestStatus, ReviewState } from '@/common/interfaces/pr-review.interfaces';
 import { PrismaService } from '@/database/prisma.service';
 import { GitlabAuthService } from './gitlab-auth.service';
@@ -33,6 +33,21 @@ export class GitlabService {
     const accessToken = await this.gitlabAuth.getDecryptedToken(userId);
     if (!accessToken) return false;
 
+    try {
+      await this.runSync(userId, accessToken);
+    } catch (err) {
+      if (err instanceof UnauthorizedException) {
+        // Token is dead (revoked/expired) — stop hammering GitLab's API on
+        // every subsequent request until the user reconnects their account.
+        await this.prisma.gitlabAccount.update({ where: { userId }, data: { tokenRevoked: true } });
+      }
+      throw err;
+    }
+
+    return true;
+  }
+
+  private async runSync(userId: string, accessToken: string): Promise<void> {
     const projects = await this.gitlabApi.listAccessibleProjects(accessToken);
 
     await mapWithConcurrency(projects, MR_FETCH_CONCURRENCY, async (project) => {
@@ -57,7 +72,6 @@ export class GitlabService {
     });
 
     this.logger.log(`GitLab sync complete for user ${userId}: ${projects.length} projects processed`);
-    return true;
   }
 
   private normalizeMergeRequest(

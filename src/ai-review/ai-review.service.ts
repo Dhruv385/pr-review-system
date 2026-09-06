@@ -9,7 +9,11 @@ import { GithubService } from '@/github/github.service';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-70b-versatile is enterprise-only now
-const MAX_DIFF_CHARS = 40_000;
+const MAX_COMPLETION_TOKENS = 1000;
+// Groq's free tier caps at 8000 tokens/minute *total* (prompt + completion).
+// Kept well under that with margin: ~4 chars/token for diff text, plus the
+// system prompt, plus MAX_COMPLETION_TOKENS reserved for the response.
+const MAX_DIFF_CHARS = 12_000;
 
 interface PullRequestRef {
   repositoryFullName: string;
@@ -85,7 +89,7 @@ export class AiReviewService {
           GROQ_API_URL,
           {
             model: this.config.get<string>('GROQ_MODEL') ?? DEFAULT_MODEL,
-            max_tokens: 1500,
+            max_tokens: MAX_COMPLETION_TOKENS,
             messages: [
               {
                 role: 'system',
@@ -115,11 +119,20 @@ export class AiReviewService {
       }
       return text;
     } catch (err) {
-      const error = err as AxiosError<unknown>;
+      const error = err as AxiosError<{ error?: { code?: string; type?: string } }>;
       this.logger.error(
         `Groq review generation failed (status=${error?.response?.status}): ` +
           `${JSON.stringify(error?.response?.data)?.slice(0, 500)}`,
       );
+
+      const groqError = error?.response?.data?.error;
+      if (error?.response?.status === 413 || groqError?.code === 'rate_limit_exceeded') {
+        throw new BadRequestException(
+          'This pull request is too large for AI review right now (the free-tier AI provider has a ' +
+            'per-minute token limit). Try again in a minute, or use it on a smaller pull request.',
+        );
+      }
+
       throw new ServiceUnavailableException('AI review generation failed. Please try again later.');
     }
   }

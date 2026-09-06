@@ -1,15 +1,17 @@
-import { BadRequestException, Controller, Get, Inject, forwardRef, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam } from '@nestjs/swagger';
+import { BadRequestException, Controller, Get, Inject, forwardRef, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@/auth/jwt-auth.guard'; // adjust to your existing guard's path
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { IUser, Platform } from '@/common/interfaces/pr-review.interfaces';
 import { PullRequestsService } from './pull-requests.service';
 import { ReviewsService } from '@/reviews/reviews.service';
 import { AiReviewService } from '@/ai-review/ai-review.service';
+import { PullRequestQueryDto } from './dto/pull-request-query.dto';
 
 @ApiTags('Pull Requests')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard)
+@ApiResponse({ status: 401, description: 'Missing or invalid access token' })
 @Controller('pull-requests')
 export class PullRequestsController {
   constructor(
@@ -19,12 +21,18 @@ export class PullRequestsController {
     private readonly aiReviewService: AiReviewService,
   ) { }
 
-  // GET /pull-requests
-  @ApiOperation({ summary: 'Get all pull requests for the authenticated user' })
+  // GET /pull-requests?platform=GITHUB
+  // Triggers a background sync against connected providers if the cached
+  // data is stale (see PR_SYNC_STALE_MINUTES) before returning results.
+  @ApiOperation({
+    summary: 'List the authenticated user\'s pull requests, optionally filtered by platform',
+    description: 'Syncs from GitHub/GitLab first if the cached data is older than PR_SYNC_STALE_MINUTES.',
+  })
+  @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
   @ApiResponse({ status: 200, description: 'List of pull requests retrieved successfully' })
   @Get()
-  async findAll(@CurrentUser() user: IUser) {
-    const pullRequests = await this.pullRequestsService.findAllForUser(user.id);
+  async findAll(@CurrentUser() user: IUser, @Query() query: PullRequestQueryDto) {
+    const pullRequests = await this.pullRequestsService.findAllForUser(user.id, query.platform as Platform | undefined);
     return { pullRequests };
   }
 
@@ -32,7 +40,7 @@ export class PullRequestsController {
   @ApiOperation({ summary: 'Get a specific pull request by ID' })
   @ApiParam({ name: 'id', description: 'Pull request ID' })
   @ApiResponse({ status: 200, description: 'Pull request retrieved successfully' })
-  @ApiResponse({ status: 404, description: 'Pull request not found' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
   @Get(':id')
   async findOne(@CurrentUser() user: IUser, @Param('id') id: string) {
     return this.pullRequestsService.findOneForUser(user.id, id);
@@ -41,18 +49,25 @@ export class PullRequestsController {
   // GET /pull-requests/:id/reviews
   @ApiOperation({ summary: 'Get reviews for a specific pull request' })
   @ApiParam({ name: 'id', description: 'Pull request ID' })
-  @ApiResponse({ status: 200, description: 'Reviews retrieved successfully' })
-  @ApiResponse({ status: 404, description: 'Pull request not found' })
+  @ApiResponse({ status: 200, description: 'Reviews retrieved successfully (empty array if none yet)' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
   @Get(':id/reviews')
   async findReviews(@CurrentUser() user: IUser, @Param('id') id: string) {
     return this.reviewsService.getReviewsForPullRequest(user.id, id);
   }
 
   // POST /pull-requests/:id/ai-review
-  @ApiOperation({ summary: 'Generate an AI code review for a pull request and post it to GitHub' })
+  @ApiOperation({
+    summary: 'Generate an AI code review for a pull request and post it as a real GitHub review',
+    description:
+      'Fetches the PR diff, sends it to the configured AI provider, and posts the result back to ' +
+      'GitHub as a COMMENT-type review (never auto-approves). GitHub-only for now.',
+  })
   @ApiParam({ name: 'id', description: 'Pull request ID' })
   @ApiResponse({ status: 201, description: 'AI review generated and posted successfully' })
-  @ApiResponse({ status: 404, description: 'Pull request not found' })
+  @ApiResponse({ status: 400, description: 'Not a GitHub pull request, no connected GitHub account, or the PR has no diff to review' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @ApiResponse({ status: 503, description: 'The AI provider or GitHub API is temporarily unavailable' })
   @Post(':id/ai-review')
   async aiReview(@CurrentUser() user: IUser, @Param('id') id: string) {
     const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
