@@ -21,18 +21,25 @@ export class PullRequestsController {
     private readonly aiReviewService: AiReviewService,
   ) { }
 
-  // GET /pull-requests?platform=GITHUB
+  // GET /pull-requests?platform=GITHUB&forceSync=true
   // Triggers a background sync against connected providers if the cached
   // data is stale (see PR_SYNC_STALE_MINUTES) before returning results.
   @ApiOperation({
     summary: 'List the authenticated user\'s pull requests, optionally filtered by platform',
-    description: 'Syncs from GitHub/GitLab first if the cached data is older than PR_SYNC_STALE_MINUTES.',
+    description:
+      'Syncs from GitHub/GitLab first if the cached data is older than PR_SYNC_STALE_MINUTES. ' +
+      'Pass forceSync=true to sync immediately regardless of staleness (e.g. right after creating a new PR).',
   })
   @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
+  @ApiQuery({ name: 'forceSync', required: false, type: Boolean, description: 'Bypass the staleness check and sync now' })
   @ApiResponse({ status: 200, description: 'List of pull requests retrieved successfully' })
   @Get()
   async findAll(@CurrentUser() user: IUser, @Query() query: PullRequestQueryDto) {
-    const pullRequests = await this.pullRequestsService.findAllForUser(user.id, query.platform as Platform | undefined);
+    const pullRequests = await this.pullRequestsService.findAllForUser(
+      user.id,
+      query.platform as Platform | undefined,
+      query.forceSync,
+    );
     return { pullRequests };
   }
 

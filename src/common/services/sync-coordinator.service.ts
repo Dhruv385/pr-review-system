@@ -32,9 +32,13 @@ export class SyncCoordinatorService {
     this.staleAfterMs = minutes * 60 * 1000;
   }
 
-  /** Syncs GitHub and/or GitLab for this user if their data is stale. Always safe to call. */
-  async ensureFresh(userId: string): Promise<void> {
-    const isStale = await this.isDataStale(userId);
+  /**
+   * Syncs GitHub and/or GitLab for this user if their data is stale. Always
+   * safe to call. Pass `force: true` to bypass the staleness check and sync
+   * immediately regardless of PR_SYNC_STALE_MINUTES.
+   */
+  async ensureFresh(userId: string, force = false): Promise<void> {
+    const isStale = force || (await this.isDataStale(userId));
     if (!isStale) {
       this.logger.debug(`Data fresh for user ${userId}, skipping sync`);
       return;
