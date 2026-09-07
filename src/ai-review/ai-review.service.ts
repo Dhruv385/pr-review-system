@@ -90,6 +90,13 @@ export class AiReviewService {
           {
             model: this.config.get<string>('GROQ_MODEL') ?? DEFAULT_MODEL,
             max_tokens: MAX_COMPLETION_TOKENS,
+            // GPT-OSS is a reasoning model — it spends tokens "thinking" in a
+            // separate field before writing the final answer. Without this,
+            // a tight max_tokens budget can be fully consumed by reasoning,
+            // leaving message.content empty. A code review doesn't need deep
+            // multi-step reasoning, so keep it minimal and leave the budget
+            // for the actual review text.
+            reasoning_effort: 'low',
             messages: [
               {
                 role: 'system',
@@ -113,7 +120,10 @@ export class AiReviewService {
         ),
       );
 
-      const text = data?.choices?.[0]?.message?.content;
+      // Fall back to the reasoning trace if content ever comes back empty
+      // (e.g. the model used its whole token budget on reasoning) rather
+      // than failing the whole request outright.
+      const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.message?.reasoning;
       if (!text) {
         throw new Error('Empty response from Groq');
       }
