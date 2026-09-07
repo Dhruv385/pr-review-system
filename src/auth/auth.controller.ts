@@ -1,10 +1,11 @@
 import { Body, Controller, Get, HttpCode, Post, Query, UseGuards } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiQuery, ApiBasicAuth } from '@nestjs/swagger';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { JwtService } from './jwt.service';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { BasicAuthGuard } from './guards/basic-auth.guard';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -14,28 +15,37 @@ export class AuthController {
         private readonly authService: AuthService,
     ) { }
 
+    @ApiBasicAuth()
     @ApiOperation({
         summary: 'Register a new account and receive an access token',
-        description: 'Email must be unique; platform + username together must also be unique (one account per platform identity).',
+        description:
+            'Requires the shared client Basic Auth credential (in addition to the account fields below) — ' +
+            'this is a gate against anonymous bots, separate from the per-user JWT this endpoint issues. ' +
+            'Email must be unique; platform + username together must also be unique (one account per platform identity).',
     })
     @ApiResponse({ status: 201, description: 'Account created; access token returned' })
     @ApiResponse({ status: 400, description: 'Validation failed (e.g. invalid email, password under 8 characters)' })
+    @ApiResponse({ status: 401, description: 'Missing or invalid Basic Auth client credential' })
     @ApiResponse({ status: 409, description: 'This email or platform username is already registered to another account' })
     @ApiResponse({ status: 429, description: 'Too many registration attempts — try again shortly' })
     @Throttle({ auth: { limit: 5, ttl: 60_000 } })
-    @UseGuards(ThrottlerGuard)
+    @UseGuards(ThrottlerGuard, BasicAuthGuard)
     @Post('register')
     async register(@Body() dto: RegisterDto) {
         return this.authService.register(dto);
     }
 
-    @ApiOperation({ summary: 'Log in with email and password to receive an access token' })
+    @ApiBasicAuth()
+    @ApiOperation({
+        summary: 'Log in with email and password to receive an access token',
+        description: 'Requires the shared client Basic Auth credential in addition to your email/password.',
+    })
     @ApiResponse({ status: 200, description: 'Access token returned' })
     @ApiResponse({ status: 400, description: 'Validation failed (missing email or password)' })
-    @ApiResponse({ status: 401, description: 'Invalid email or password' })
+    @ApiResponse({ status: 401, description: 'Invalid email/password, or missing/invalid Basic Auth client credential' })
     @ApiResponse({ status: 429, description: 'Too many login attempts — try again shortly' })
     @Throttle({ auth: { limit: 10, ttl: 60_000 } })
-    @UseGuards(ThrottlerGuard)
+    @UseGuards(ThrottlerGuard, BasicAuthGuard)
     @HttpCode(200)
     @Post('login')
     async login(@Body() dto: LoginDto) {

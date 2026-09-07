@@ -6,6 +6,7 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { IUser } from '@/common/interfaces/pr-review.interfaces';
 import { ReviewsService } from './reviews.service';
 import { ReviewQueryDto } from './dto/review-query.dto';
+import { buildPaginationMeta } from '@/common/utils/pagination.util';
 
 @ApiTags('Reviews')
 @ApiBearerAuth()
@@ -15,17 +16,21 @@ import { ReviewQueryDto } from './dto/review-query.dto';
 export class ReviewsController {
   constructor(private readonly reviewsService: ReviewsService) { }
 
-  // GET /reviews?platform=GITHUB
+  // GET /reviews?platform=GITHUB&page=1&limit=20
   @ApiOperation({ summary: 'Get all reviews for the authenticated user, optionally filtered by platform' })
   @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
-  @ApiResponse({ status: 200, description: 'Reviews retrieved successfully (empty array if none match)' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (1-indexed, default 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default 20, max 100)' })
+  @ApiResponse({ status: 200, description: 'Paginated reviews retrieved successfully (empty array if none match)' })
   @Get()
   async findAll(@CurrentUser() user: IUser, @Query() query: ReviewQueryDto) {
-    const reviews = await this.reviewsService.findAllForUser(
+    const { items, total } = await this.reviewsService.findAllForUser(
       user.id,
       query.platform as Platform | undefined,
+      query.page,
+      query.limit,
     );
-    return { reviews };
+    return { reviews: items, meta: buildPaginationMeta(query.page, query.limit, total) };
   }
 
   // GET /reviews/:reviewId/pull-request

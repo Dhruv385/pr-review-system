@@ -45,18 +45,33 @@ export class ReviewsService {
   }
 
   /** GET /reviews — all reviews owned by the user, optionally filtered by platform. */
-  async findAllForUser(userId: string, platform?: Platform): Promise<ReviewResponseDto[]> {
-    const reviews = await this.prisma.review.findMany({
-      where: {
-        pullRequest: {
-          userId, // ownership enforced through the PullRequest relation
-          ...(platform ? { platform } : {}),
-        },
+  async findAllForUser(
+    userId: string,
+    platform?: Platform,
+    page = 1,
+    limit = 20,
+  ): Promise<{ items: ReviewResponseDto[]; total: number }> {
+    const where = {
+      pullRequest: {
+        userId, // ownership enforced through the PullRequest relation
+        ...(platform ? { platform } : {}),
       },
-      orderBy: { submittedAt: 'desc' },
-    });
+    };
 
-    return plainToInstance(ReviewResponseDto, reviews, { excludeExtraneousValues: true });
+    const [reviews, total] = await Promise.all([
+      this.prisma.review.findMany({
+        where,
+        orderBy: { submittedAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.review.count({ where }),
+    ]);
+
+    return {
+      items: plainToInstance(ReviewResponseDto, reviews, { excludeExtraneousValues: true }),
+      total,
+    };
   }
 
   /** GET /reviews/:reviewId/pull-request */

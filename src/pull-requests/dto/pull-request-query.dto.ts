@@ -1,8 +1,9 @@
 import { IsBoolean, IsIn, IsOptional } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
+import { PaginationQueryDto } from '@/common/dto/pagination-query.dto';
 
-export class PullRequestQueryDto {
+export class PullRequestQueryDto extends PaginationQueryDto {
   @ApiProperty({ enum: ['GITHUB', 'GITLAB'], required: false, description: 'Filter pull requests by provider platform' })
   @IsOptional()
   @IsIn(['GITHUB', 'GITLAB'])
