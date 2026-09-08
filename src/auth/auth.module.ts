@@ -1,4 +1,5 @@
 import { Global, Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ThrottlerModule } from '@nestjs/throttler';
@@ -11,19 +12,17 @@ import { BasicAuthGuard } from './guards/basic-auth.guard';
 import { PasswordService } from '@/common/services/password.service';
 import { DatabaseModule } from '@/database/database.module';
 
-const jwtSecret = process.env.JWT_SECRET;
-if (!jwtSecret) {
-    throw new Error('JWT_SECRET is not set');
-}
-
 @Global()
 @Module({
     imports: [
         DatabaseModule,
         PassportModule,
-        JwtModule.register({
-            secret: jwtSecret,
-            signOptions: { expiresIn: '24h' },
+        JwtModule.registerAsync({
+            inject: [ConfigService],
+            useFactory: (config: ConfigService) => ({
+                secret: config.getOrThrow<string>('JWT_SECRET'),
+                signOptions: { expiresIn: '24h' },
+            }),
         }),
         ThrottlerModule.forRoot([{ name: 'auth', ttl: 60_000, limit: 20 }]),
     ],

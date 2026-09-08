@@ -17,7 +17,7 @@ const logger = new Logger('ProviderError');
  * `provider` is only used for the log/message prefix.
  */
 export function mapProviderError(err: unknown, provider: 'GitHub' | 'GitLab'): never {
-  const error = err as AxiosError<any>;
+  const error = err as AxiosError<unknown>;
   const status = error?.response?.status;
   const body = error?.response?.data;
 

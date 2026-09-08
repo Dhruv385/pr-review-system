@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -7,6 +8,8 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
 async function bootstrap() {
     const app = await NestFactory.create(AppModule);
+    const configService = app.get(ConfigService);
+    app.enableShutdownHooks();
 
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
@@ -15,14 +18,14 @@ async function bootstrap() {
     app.useGlobalFilters(new AllExceptionsFilter());
     app.useGlobalInterceptors(new LoggingInterceptor());
 
-    const configuredOrigins = (process.env.CORS_ORIGINS ?? '')
+    const configuredOrigins = configService.get<string>('CORS_ORIGINS', '')
         .split(',')
         .map((origin) => origin.trim())
         .filter(Boolean);
 
     app.enableCors({
         origin: (requestOrigin, callback) => {
-            const isLocalDevelopmentOrigin = process.env.NODE_ENV !== 'production'
+            const isLocalDevelopmentOrigin = configService.get<string>('NODE_ENV') !== 'production'
                 && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(requestOrigin ?? '');
             const isConfiguredOrigin = requestOrigin !== undefined
                 && configuredOrigins.includes(requestOrigin);
@@ -64,7 +67,7 @@ async function bootstrap() {
         },
     });
 
-    const port = process.env.PORT ?? 3000;
+    const port = Number(configService.get<string>('PORT', '3000'));
     await app.listen(port);
     console.log(`Application running on port ${port}`);
     console.log(`Swagger documentation available at http://localhost:${port}/api/docs`);

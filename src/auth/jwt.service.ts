@@ -45,7 +45,7 @@ export class JwtService {
             return this.jwtService.verify<JwtPayload>(token, {
                 secret: this.secret,
             });
-        } catch (error) {
+        } catch {
             return null;
         }
     }

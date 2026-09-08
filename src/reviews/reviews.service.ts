@@ -1,9 +1,8 @@
-import { Inject, forwardRef, Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { Platform } from '@prisma/client';
 import { plainToInstance } from 'class-transformer';
 import { PrismaService } from '@/database/prisma.service';
 import { SyncCoordinatorService } from '@/common/services/sync-coordinator.service';
-import { PullRequestsService } from '@/pull-requests/pull-requests.service';
 import { PullRequestResponseDto } from '@/pull-requests/dto/pull-request-response.dto';
 import { ReviewResponseDto } from './dto/review-response.dto';
 
@@ -12,15 +11,19 @@ export class ReviewsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly syncCoordinator: SyncCoordinatorService,
-    @Inject(forwardRef(() => PullRequestsService))
-    private readonly pullRequestsService: PullRequestsService,
-  ) {}
+  ) { }
 
   /** GET /pull-requests/:id/reviews — syncs (if stale) then returns PR + its reviews. */
   async getReviewsForPullRequest(userId: string, pullRequestId: string) {
     // Ownership check FIRST, before touching any provider API, so a user can
     // never trigger a sync side-effect for a PR they don't own.
-    await this.pullRequestsService.getOwnedPullRequestOrThrow(userId, pullRequestId);
+    const ownedPullRequest = await this.prisma.pullRequest.findFirst({
+      where: { id: pullRequestId, userId },
+      select: { id: true },
+    });
+    if (!ownedPullRequest) {
+      throw new NotFoundException('Pull request not found');
+    }
     await this.syncCoordinator.ensureFresh(userId);
 
     const pullRequest = await this.prisma.pullRequest.findFirst({
