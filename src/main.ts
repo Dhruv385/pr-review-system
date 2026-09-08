@@ -9,6 +9,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 async function bootstrap() {
     const app = await NestFactory.create(AppModule);
     const configService = app.get(ConfigService);
+    app.enableShutdownHooks();
 
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
@@ -66,8 +67,7 @@ async function bootstrap() {
         },
     });
 
-    const port = configService.get<number>('PORT', 3000);
-    app.enableShutdownHooks();
+    const port = Number(configService.get<string>('PORT', '3000'));
     await app.listen(port);
     console.log(`Application running on port ${port}`);
     console.log(`Swagger documentation available at http://localhost:${port}/api/docs`);
