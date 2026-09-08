@@ -1,0 +1,1 @@
+export const CONTEXT_CONFIG = Symbol('LOGGER_CONTEXT_CONFIG');

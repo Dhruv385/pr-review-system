@@ -13,6 +13,33 @@
         "paths": {
             "@/*": [
                 "src/*"
+            ],
+            "@app/*": [
+                "src/app/*"
+            ],
+            "@api/*": [
+                "src/app/api/*"
+            ],
+            "@shared/*": [
+                "src/app/shared/*"
+            ],
+            "@guards/*": [
+                "src/app/guards/*"
+            ],
+            "@decorators/*": [
+                "src/app/decorators/*"
+            ],
+            "@config/*": [
+                "src/config/*"
+            ],
+            "@filter/*": [
+                "src/filter/*"
+            ],
+            "@interceptors/*": [
+                "src/interceptors/*"
+            ],
+            "@utils/*": [
+                "src/utils/*"
             ]
         },
         "incremental": true,
