@@ -7,6 +7,7 @@ import { PullRequestsService } from './pull-requests.service';
 import { ReviewsService } from '@/reviews/reviews.service';
 import { AiReviewService } from '@/ai-review/ai-review.service';
 import { PullRequestQueryDto } from './dto/pull-request-query.dto';
+import { buildPaginationMeta } from '@/common/utils/pagination.util';
 
 @ApiTags('Pull Requests')
 @ApiBearerAuth()
@@ -32,15 +33,19 @@ export class PullRequestsController {
   })
   @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
   @ApiQuery({ name: 'forceSync', required: false, type: Boolean, description: 'Bypass the staleness check and sync now' })
-  @ApiResponse({ status: 200, description: 'List of pull requests retrieved successfully' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Page number (1-indexed, default 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Items per page (default 20, max 100)' })
+  @ApiResponse({ status: 200, description: 'Paginated list of pull requests retrieved successfully' })
   @Get()
   async findAll(@CurrentUser() user: IUser, @Query() query: PullRequestQueryDto) {
-    const pullRequests = await this.pullRequestsService.findAllForUser(
+    const { items, total } = await this.pullRequestsService.findAllForUser(
       user.id,
       query.platform as Platform | undefined,
       query.forceSync,
+      query.page,
+      query.limit,
     );
-    return { pullRequests };
+    return { pullRequests: items, meta: buildPaginationMeta(query.page, query.limit, total) };
   }
 
   // GET /pull-requests/:id

@@ -39,14 +39,18 @@ async function bootstrap() {
         .setTitle('PR Review System API')
         .setDescription(
             'GitHub and GitLab Pull Request review management, with AI-assisted code review.\n\n' +
-            '**Typical flow:** `POST /auth/register` (or `/auth/login`) → copy the returned ' +
-            '`accessToken` into the Authorize button below → `GET /accounts/{provider}/connect` to ' +
-            'get an OAuth URL, open it in a browser to link your account → `GET /pull-requests` to ' +
-            'sync and list your PRs.\n\n' +
+            '**Typical flow:** authorize below with the shared **Basic Auth** client credential, then ' +
+            '`POST /auth/register` (or `/auth/login`) → copy the returned `accessToken` into the ' +
+            '**Bearer** Authorize field → `GET /accounts/{provider}/connect` to get an OAuth URL, open ' +
+            'it in a browser to link your account → `GET /pull-requests` to sync and list your PRs.\n\n' +
+            '`/auth/register` and `/auth/login` require both: the shared Basic Auth client credential ' +
+            '(gates anonymous bots off the signup surface) and their own request body — Basic Auth is ' +
+            'not a substitute for the per-user JWT those endpoints issue on success.\n\n' +
             'Every error response follows the same shape: `{ statusCode, error, message, timestamp, path }`.',
         )
         .setVersion('1.0.0')
         .addBearerAuth()
+        .addBasicAuth({ type: 'http', scheme: 'basic', description: 'Shared client credential required on /auth/register and /auth/login' })
         .addTag('Authentication', 'Register, log in, and verify access tokens')
         .addTag('Accounts', 'OAuth account linking for GitHub and GitLab')
         .addTag('Pull Requests', 'Pull request retrieval, sync, and AI-assisted review')

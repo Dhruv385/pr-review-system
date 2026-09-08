@@ -12,18 +12,31 @@ export class PullRequestsService {
     private readonly syncCoordinator: SyncCoordinatorService,
   ) { }
 
-  async findAllForUser(userId: string, platform?: Platform, forceSync = false): Promise<PullRequestResponseDto[]> {
+  async findAllForUser(
+    userId: string,
+    platform?: Platform,
+    forceSync = false,
+    page = 1,
+    limit = 20,
+  ): Promise<{ items: PullRequestResponseDto[]; total: number }> {
     await this.syncCoordinator.ensureFresh(userId, forceSync);
 
-    const pullRequests = await this.prisma.pullRequest.findMany({
-      where: { userId, ...(platform ? { platform } : {}) }, // ownership enforced at the query level, always
-      include: { _count: { select: { reviews: true } } },
-      orderBy: { updatedAt: 'desc' },
-    });
+    const where = { userId, ...(platform ? { platform } : {}) }; // ownership enforced at the query level, always
+    const [pullRequests, total] = await Promise.all([
+      this.prisma.pullRequest.findMany({
+        where,
+        include: { _count: { select: { reviews: true } } },
+        orderBy: { updatedAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.pullRequest.count({ where }),
+    ]);
 
-    return plainToInstance(PullRequestResponseDto, pullRequests, {
-      excludeExtraneousValues: true,
-    });
+    return {
+      items: plainToInstance(PullRequestResponseDto, pullRequests, { excludeExtraneousValues: true }),
+      total,
+    };
   }
 
   async findOneForUser(userId: string, pullRequestId: string): Promise<PullRequestResponseDto> {
