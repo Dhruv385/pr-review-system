@@ -84,7 +84,7 @@ export class GitlabApiClient {
         ),
       );
       return data.approved_by ?? [];
-    } catch (err) {
+    } catch {
       // Approvals endpoint is a paid-tier feature on some GitLab plans / self-managed
       // instances without it enabled — degrade gracefully instead of failing the sync.
       this.logger.warn(`GitLab approvals unavailable for MR ${mrIid} on project ${projectId}`);
