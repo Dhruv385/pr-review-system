@@ -9,7 +9,7 @@ import { GithubService } from '@api/github/github.service';
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-70b-versatile is enterprise-only now
-const MAX_COMPLETION_TOKENS = 1000;
+const MAX_COMPLETION_TOKENS = 4000;
 // Groq's free tier caps at 8000 tokens/minute *total* (prompt + completion).
 // Kept well under that with margin: ~4 chars/token for diff text, plus the
 // system prompt, plus MAX_COMPLETION_TOKENS reserved for the response.
