@@ -3,9 +3,17 @@ import { EnvService } from '@shared/env';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { AxiosError } from 'axios';
+import { readFile } from 'fs/promises';
+import { join } from 'path';
 import { GithubAuthService } from '@api/github/github-auth.service';
 import { GithubApiClient, GithubPullFile } from '@api/github/github-api.client';
 import { GithubService } from '@api/github/github.service';
+
+// Read fresh from disk on every review (not cached in memory) so editing the
+// wording is a content change, not a code change — no redeploy or restart
+// needed to pick it up. `assets` in nest-cli.json copies this file next to
+// the compiled service in dist/ on build.
+const SYSTEM_PROMPT_PATH = join(__dirname, 'prompts', 'review-system-prompt.md');
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-70b-versatile is enterprise-only now
@@ -231,6 +239,20 @@ export class AiReviewService {
     return parts.join('\n');
   }
 
+  /**
+   * Loads the reviewer system prompt from disk on every call — deliberately
+   * not cached, so editing prompts/review-system-prompt.md takes effect on
+   * the next review with no code change, rebuild, or restart required.
+   */
+  private async loadSystemPrompt(): Promise<string> {
+    try {
+      return (await readFile(SYSTEM_PROMPT_PATH, 'utf-8')).trim();
+    } catch (err) {
+      this.logger.error(`Failed to read system prompt at ${SYSTEM_PROMPT_PATH}: ${(err as Error).message}`);
+      throw new ServiceUnavailableException('AI review is misconfigured: the reviewer prompt could not be loaded.');
+    }
+  }
+
   private async generateReview(
     prTitle: string,
     diff: string,
@@ -254,6 +276,8 @@ export class AiReviewService {
       .filter(Boolean)
       .join('\n\n');
 
+    const systemPrompt = await this.loadSystemPrompt();
+
     try {
       const { data } = await firstValueFrom(
         this.http.post(
@@ -269,24 +293,7 @@ export class AiReviewService {
             // for the actual review text.
             reasoning_effort: 'low',
             messages: [
-              {
-                role: 'system',
-                content:
-                  'You are an expert code reviewer leaving a review on a GitHub pull request. You will be ' +
-                  'given project context (language, dependencies, description, folder layout, and recurring ' +
-                  'architectural layer conventions such as controller/service/module), pull request context ' +
-                  '(title, description, and each changed file tagged with the layer it belongs to), and the ' +
-                  "unified diff. Use the project context to judge the change against that codebase's own " +
-                  'architecture and idioms rather than generic best practice, and use which layers the PR ' +
-                  'touches together (e.g. a controller and its service, or a module and its DTOs) to reason ' +
-                  'about the actual runtime flow the change affects — such as whether a change on one layer ' +
-                  'is correctly reflected on the others it depends on or feeds into. Use the PR description ' +
-                  'to understand intent and scope. Keep the review itself focused on what the diff actually ' +
-                  'changes. Identify real bugs, security issues, and correctness problems — not style ' +
-                  'nitpicks unless they are significant. Be concise and specific, referencing file names from ' +
-                  'the diff. Write in GitHub-flavored markdown suitable for posting directly as a PR review ' +
-                  'comment. End with a one-line verdict.',
-              },
+              { role: 'system', content: systemPrompt },
               { role: 'user', content: `${contextBlock}\n\n## Diff\n\`\`\`diff\n${clippedDiff}\n\`\`\`` },
             ],
           },
