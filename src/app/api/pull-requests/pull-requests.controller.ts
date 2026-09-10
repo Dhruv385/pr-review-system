@@ -1,4 +1,4 @@
-import { BadRequestException, Controller, Get, Inject, forwardRef, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, forwardRef, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@guards/jwt';
 import { CurrentUser } from '@decorators/current-user.decorator';
@@ -6,7 +6,9 @@ import { IUser, Platform } from '@app/interfaces/pr-review.interfaces';
 import { PullRequestsService } from './pull-requests.service';
 import { ReviewsService } from '@api/reviews/reviews.service';
 import { AiReviewService } from '@api/ai-review/ai-review.service';
+import { ReviewRulesService } from '@api/review-rules/review-rules.service';
 import { PullRequestQueryDto } from './dto/pull-request-query.dto';
+import { CreateReviewRuleDto } from '@api/review-rules/dto/create-review-rule.dto';
 import { buildPaginationMeta } from '@utils/pagination.util';
 
 @ApiTags('Pull Requests')
@@ -20,6 +22,7 @@ export class PullRequestsController {
     @Inject(forwardRef(() => ReviewsService))
     private readonly reviewsService: ReviewsService,
     private readonly aiReviewService: AiReviewService,
+    private readonly reviewRulesService: ReviewRulesService,
   ) { }
 
   // GET /pull-requests?platform=GITHUB&forceSync=true
@@ -96,5 +99,56 @@ export class PullRequestsController {
     });
 
     return { reviewed: true, ...result };
+  }
+
+  // GET /pull-requests/:id/rules
+  @ApiOperation({
+    summary: "List this PR's repo custom AI review rules",
+    description:
+      "Reads .pr-review/rules.json from the PR's repository (default branch). These are the rules " +
+      "AiReviewService matches against each review's changed files and injects into the prompt.",
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 200, description: 'Rules retrieved successfully (empty array if none configured)' })
+  @ApiResponse({ status: 400, description: 'Not a GitHub pull request, or no connected GitHub account' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @Get(':id/rules')
+  async listRules(@CurrentUser() user: IUser, @Param('id') id: string) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+
+    if (pullRequest.platform !== Platform.GITHUB) {
+      throw new BadRequestException('Review rules are currently only supported for GitHub pull requests.');
+    }
+
+    const rules = await this.reviewRulesService.listRules(user.id, pullRequest.repositoryFullName);
+    return { rules };
+  }
+
+  // POST /pull-requests/:id/rules
+  @ApiOperation({
+    summary: "Add a custom AI review rule to this PR's repo",
+    description:
+      "Appends to .pr-review/rules.json in the PR's repository and commits the change under the " +
+      'connected GitHub account. Scope a rule to specific files with `pattern` (a glob matched against ' +
+      "changed file paths), or omit it to apply the rule to every future review in this repo.",
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 201, description: 'Rule created and committed successfully' })
+  @ApiResponse({
+    status: 400,
+    description:
+      'Not a GitHub pull request, no connected GitHub account, or the repo\'s rules file has invalid JSON',
+  })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @Post(':id/rules')
+  async addRule(@CurrentUser() user: IUser, @Param('id') id: string, @Body() dto: CreateReviewRuleDto) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+
+    if (pullRequest.platform !== Platform.GITHUB) {
+      throw new BadRequestException('Review rules are currently only supported for GitHub pull requests.');
+    }
+
+    const rule = await this.reviewRulesService.addRule(user.id, pullRequest.repositoryFullName, dto);
+    return { rule };
   }
 }

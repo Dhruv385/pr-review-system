@@ -8,6 +8,7 @@ import { join } from 'path';
 import { GithubAuthService } from '@api/github/github-auth.service';
 import { GithubApiClient, GithubPullFile } from '@api/github/github-api.client';
 import { GithubService } from '@api/github/github.service';
+import { ReviewRulesService, ReviewRule } from '@api/review-rules/review-rules.service';
 
 // Read fresh from disk on every review (not cached in memory) so editing the
 // wording is a content change, not a code change — no redeploy or restart
@@ -57,6 +58,7 @@ export class AiReviewService {
     private readonly githubAuth: GithubAuthService,
     private readonly githubApi: GithubApiClient,
     private readonly githubService: GithubService,
+    private readonly reviewRules: ReviewRulesService,
   ) {}
 
   async reviewGithubPullRequest(userId: string, pr: PullRequestRef): Promise<AiReviewResult> {
@@ -70,9 +72,10 @@ export class AiReviewService {
       throw new BadRequestException('This pull request has no diff to review.');
     }
 
-    // Best-effort enrichment so the review reflects the actual project and PR,
-    // not just the raw diff — a failure here must never block the review itself.
-    const [projectContext, files] = await Promise.all([
+    // Best-effort enrichment so the review reflects the actual project, PR,
+    // and any team-authored rules — a failure here must never block the
+    // review itself.
+    const [projectContext, files, rules] = await Promise.all([
       this.gatherProjectContext(accessToken, pr.repositoryFullName),
       this.githubApi.listPullRequestFiles(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
         this.logger.warn(
@@ -80,10 +83,17 @@ export class AiReviewService {
         );
         return [] as GithubPullFile[];
       }),
+      this.reviewRules.listRules(userId, pr.repositoryFullName).catch((err) => {
+        this.logger.warn(`Failed to load review rules for ${pr.repositoryFullName}: ${(err as Error).message}`);
+        return [] as ReviewRule[];
+      }),
     ]);
     const prContext = this.formatPrContext(pr, files);
+    const rulesContext = this.reviewRules.formatForPrompt(
+      this.reviewRules.matchRules(rules, files.map((f) => f.filename)),
+    );
 
-    const body = await this.generateReview(pr.title, diff, projectContext, prContext);
+    const body = await this.generateReview(pr.title, diff, projectContext, prContext, rulesContext);
 
     const posted = await this.githubApi.submitReview(accessToken, pr.repositoryFullName, pr.number, {
       body,
@@ -258,6 +268,7 @@ export class AiReviewService {
     diff: string,
     projectContext: string,
     prContext: string,
+    rulesContext: string,
   ): Promise<string> {
     const apiKey = this.env.AI.GROQ_API_KEY;
     if (!apiKey) {
@@ -271,6 +282,7 @@ export class AiReviewService {
 
     const contextBlock = [
       projectContext && `## Project context\n${projectContext}`,
+      rulesContext && `## Team review rules\n${rulesContext}`,
       `## Pull request context\nTitle: ${prTitle}${prContext ? `\n${prContext}` : ''}`,
     ]
       .filter(Boolean)

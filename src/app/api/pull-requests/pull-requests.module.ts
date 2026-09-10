@@ -5,9 +5,10 @@ import { SyncModule } from '@api/sync/sync.module';
 import { ReviewsModule } from '@api/reviews/reviews.module';
 import { DatabaseModule } from '@shared/database/database.module';
 import { AiReviewModule } from '@api/ai-review/ai-review.module';
+import { ReviewRulesModule } from '@api/review-rules/review-rules.module';
 
 @Module({
-  imports: [DatabaseModule, SyncModule, forwardRef(() => ReviewsModule), AiReviewModule],
+  imports: [DatabaseModule, SyncModule, forwardRef(() => ReviewsModule), AiReviewModule, ReviewRulesModule],
   controllers: [PullRequestsController],
   providers: [PullRequestsService],
   exports: [PullRequestsService],
