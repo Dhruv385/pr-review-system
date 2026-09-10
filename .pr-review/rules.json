@@ -1,0 +1,39 @@
+{
+  "rules": [
+    {
+      "id": "8f3a1c02",
+      "text": "Never read process.env directly. Add the key to the relevant *.config.ts class and env.module.ts's groupFlatConfig(), then access it through EnvService so it's validated at boot.",
+      "pattern": null,
+      "source": "manual",
+      "createdAt": "2026-09-10T00:00:00.000Z"
+    },
+    {
+      "id": "2b6d9e41",
+      "text": "GitHub/GitLab REST calls must go through mapProviderError() in a catch block instead of handling axios errors ad hoc, so failures map to consistent HTTP exceptions.",
+      "pattern": "src/app/api/{github,gitlab}/**",
+      "source": "manual",
+      "createdAt": "2026-09-10T00:00:00.000Z"
+    },
+    {
+      "id": "5c1f7a83",
+      "text": "Request DTOs must validate every field with class-validator decorators (no manual if-checks in the controller/service for shape validation).",
+      "pattern": "**/dto/*.dto.ts",
+      "source": "manual",
+      "createdAt": "2026-09-10T00:00:00.000Z"
+    },
+    {
+      "id": "9d4e2b17",
+      "text": "Enrichment calls that are not the primary purpose of the request (e.g. extra context fetches, post-action syncs) must be best-effort: wrapped in try/catch, logged with logger.warn, and must never fail the primary operation.",
+      "pattern": "src/app/api/**/*.service.ts",
+      "source": "manual",
+      "createdAt": "2026-09-10T00:00:00.000Z"
+    },
+    {
+      "id": "f0a83c56",
+      "text": "Do not flag missing JSDoc/comments as an issue. This codebase intentionally keeps comments minimal — only flag a comment as missing if it explains a genuinely non-obvious constraint or workaround.",
+      "pattern": null,
+      "source": "manual",
+      "createdAt": "2026-09-10T00:00:00.000Z"
+    }
+  ]
+}

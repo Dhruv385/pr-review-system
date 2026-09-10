@@ -25,6 +25,11 @@ export interface GithubPullFile {
   deletions: number;
 }
 
+export interface GithubFileMeta {
+  content: string;
+  sha: string;
+}
+
 export interface GithubPull {
   id: number;
   number: number;
@@ -204,11 +209,13 @@ export class GithubApiClient {
   }
 
   /**
-   * Raw text content of a file at a given ref, or null if it doesn't exist.
-   * Best-effort lookup (e.g. package.json, README) — a missing file is a
-   * normal outcome here, not an error, so 404s resolve to null instead of throwing.
+   * Content + blob sha of a file at a given ref, or null if it doesn't exist.
+   * The sha is required by the Contents API to update an existing file —
+   * best-effort lookup (e.g. package.json, README, review rules), so a
+   * missing file is a normal outcome here, not an error: 404s resolve to
+   * null instead of throwing.
    */
-  async getFileContent(accessToken: string, fullName: string, path: string, ref?: string): Promise<string | null> {
+  async getFileMeta(accessToken: string, fullName: string, path: string, ref?: string): Promise<GithubFileMeta | null> {
     try {
       const { data } = await firstValueFrom(
         this.http.get(`/repos/${fullName}/contents/${path}`, {
@@ -217,9 +224,51 @@ export class GithubApiClient {
         }),
       );
       if (Array.isArray(data) || data.type !== 'file' || !data.content) return null;
-      return Buffer.from(data.content, data.encoding === 'base64' ? 'base64' : 'utf-8').toString('utf-8');
+      return {
+        content: Buffer.from(data.content, data.encoding === 'base64' ? 'base64' : 'utf-8').toString('utf-8'),
+        sha: data.sha,
+      };
     } catch (err) {
       if ((err as AxiosError)?.response?.status === 404) return null;
+      mapProviderError(err, 'GitHub');
+    }
+  }
+
+  /** Raw text content of a file at a given ref, or null if it doesn't exist. */
+  async getFileContent(accessToken: string, fullName: string, path: string, ref?: string): Promise<string | null> {
+    const meta = await this.getFileMeta(accessToken, fullName, path, ref);
+    return meta?.content ?? null;
+  }
+
+  /**
+   * Creates or updates a file's content on a branch via the Contents API,
+   * committed under the connected account's own identity — used to persist
+   * review rules back into the target repo. Pass `sha` (from getFileMeta)
+   * when updating an existing file; omit it to create a new one.
+   */
+  async upsertFileContent(
+    accessToken: string,
+    fullName: string,
+    path: string,
+    content: string,
+    message: string,
+    options: { sha?: string; branch?: string } = {},
+  ): Promise<{ sha: string }> {
+    try {
+      const { data } = await firstValueFrom(
+        this.http.put(
+          `/repos/${fullName}/contents/${path}`,
+          {
+            message,
+            content: Buffer.from(content, 'utf-8').toString('base64'),
+            sha: options.sha,
+            branch: options.branch,
+          },
+          this.axiosConfig(accessToken),
+        ),
+      );
+      return { sha: data.content.sha };
+    } catch (err) {
       mapProviderError(err, 'GitHub');
     }
   }
