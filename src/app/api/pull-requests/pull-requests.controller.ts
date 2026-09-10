@@ -92,6 +92,7 @@ export class PullRequestsController {
       repositoryFullName: pullRequest.repositoryFullName,
       number: pullRequest.number,
       title: pullRequest.title,
+      description: pullRequest.description,
     });
 
     return { reviewed: true, ...result };

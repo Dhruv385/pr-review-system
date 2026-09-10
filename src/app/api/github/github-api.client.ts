@@ -1,12 +1,28 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
+import { AxiosError } from 'axios';
 import { mapProviderError } from '@app/exceptions/provider.exceptions';
 
 export interface GithubRepo {
   id: number;
   name: string;
   full_name: string;
+}
+
+export interface GithubRepoDetails {
+  full_name: string;
+  description: string | null;
+  language: string | null;
+  topics: string[];
+  default_branch: string;
+}
+
+export interface GithubPullFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
 }
 
 export interface GithubPull {
@@ -135,6 +151,75 @@ export class GithubApiClient {
       );
       return data;
     } catch (err) {
+      mapProviderError(err, 'GitHub');
+    }
+  }
+
+  /**
+   * Full recursive file listing (paths only) at a ref — used to sniff the
+   * project's folder layout and architectural conventions for AI review
+   * context. GitHub silently truncates the response for very large repos
+   * (`truncated: true`); that's fine here, a partial listing is still useful signal.
+   */
+  async getRepoTree(accessToken: string, fullName: string, ref: string): Promise<string[]> {
+    try {
+      const { data } = await firstValueFrom(
+        this.http.get(`/repos/${fullName}/git/trees/${ref}`, {
+          ...this.axiosConfig(accessToken),
+          params: { recursive: 1 },
+        }),
+      );
+      const tree = Array.isArray(data.tree) ? data.tree : [];
+      return tree
+        .filter((entry: { type: string }) => entry.type === 'blob')
+        .map((entry: { path: string }) => entry.path);
+    } catch (err) {
+      mapProviderError(err, 'GitHub');
+    }
+  }
+
+  /** Repo metadata (language, description, default branch) — used to give the AI reviewer project context. */
+  async getRepoDetails(accessToken: string, fullName: string): Promise<GithubRepoDetails> {
+    try {
+      const { data } = await firstValueFrom(
+        this.http.get(`/repos/${fullName}`, this.axiosConfig(accessToken)),
+      );
+      return {
+        full_name: data.full_name,
+        description: data.description ?? null,
+        language: data.language ?? null,
+        topics: Array.isArray(data.topics) ? data.topics : [],
+        default_branch: data.default_branch,
+      };
+    } catch (err) {
+      mapProviderError(err, 'GitHub');
+    }
+  }
+
+  /** Filenames + change stats for a PR — gives the reviewer the full change scope even when the diff itself is truncated. */
+  async listPullRequestFiles(accessToken: string, fullName: string, prNumber: number): Promise<GithubPullFile[]> {
+    return this.paginate<GithubPullFile>(accessToken, `/repos/${fullName}/pulls/${prNumber}/files`, {
+      per_page: PAGE_SIZE,
+    });
+  }
+
+  /**
+   * Raw text content of a file at a given ref, or null if it doesn't exist.
+   * Best-effort lookup (e.g. package.json, README) — a missing file is a
+   * normal outcome here, not an error, so 404s resolve to null instead of throwing.
+   */
+  async getFileContent(accessToken: string, fullName: string, path: string, ref?: string): Promise<string | null> {
+    try {
+      const { data } = await firstValueFrom(
+        this.http.get(`/repos/${fullName}/contents/${path}`, {
+          ...this.axiosConfig(accessToken),
+          params: ref ? { ref } : undefined,
+        }),
+      );
+      if (Array.isArray(data) || data.type !== 'file' || !data.content) return null;
+      return Buffer.from(data.content, data.encoding === 'base64' ? 'base64' : 'utf-8').toString('utf-8');
+    } catch (err) {
+      if ((err as AxiosError)?.response?.status === 404) return null;
       mapProviderError(err, 'GitHub');
     }
   }
