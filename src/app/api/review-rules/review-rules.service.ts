@@ -37,7 +37,7 @@ export class ReviewRulesService {
     const row = await this.prisma.reviewRule.findUnique({
       where: { userId_repositoryFullName: { userId, repositoryFullName } },
     });
-    return this.parseRules(row?.rules);
+    return this.parseRules(JSON.stringify(row?.rules ?? []));
   }
 
   /** A rule with no pattern applies everywhere; otherwise it must glob-match at least one changed file. */
@@ -65,7 +65,7 @@ export class ReviewRulesService {
     const existing = await this.prisma.reviewRule.findUnique({
       where: { userId_repositoryFullName: { userId, repositoryFullName } },
     });
-    const rules = this.parseRules(existing?.rules);
+    const rules = this.parseRules(JSON.stringify(existing?.rules ?? []));
 
     const rule: ReviewRule = {
       id: randomUUID().slice(0, 8),
