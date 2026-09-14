@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
 import { ReviewRulesService } from './review-rules.service';
-import { GithubModule } from '@api/github/github.module';
+import { DatabaseModule } from '@shared/database/database.module';
 
 @Module({
-  imports: [GithubModule],
+  imports: [DatabaseModule],
   providers: [ReviewRulesService],
   exports: [ReviewRulesService],
 })

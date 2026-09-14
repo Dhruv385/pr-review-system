@@ -36,6 +36,7 @@ model User {
     githubAccount    GithubAccount?
     gitlabAccount    GitlabAccount?
     pullRequests     PullRequest[]
+    reviewRules      ReviewRule[]
     createdAt        DateTime       @default(now())
     updatedAt        DateTime       @updatedAt
 
@@ -116,4 +117,24 @@ model Review {
     @@unique([pullRequestId, externalId], name: "pullRequestId_externalId")
     @@index([pullRequestId])
     @@map("reviews")
+}
+
+// Custom AI review rules, scoped by repo (not PR) since a rule applies to
+// every PR in that repo, not just the one it was created from. There's no
+// standalone Repository entity in this schema, so repositoryFullName is the
+// same denormalized reference PullRequest already uses. One row holds every
+// rule for a given (user, repo) as a JSON array, mirroring the original
+// .pr-review/rules.json shape, rather than one row per rule.
+model ReviewRule {
+    id                 String   @id @default(cuid())
+    userId             String
+    repositoryFullName String
+    rules              Json     @default("[]")
+    createdAt          DateTime @default(now())
+    updatedAt          DateTime @updatedAt
+
+    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    @@unique([userId, repositoryFullName])
+    @@map("review_rules")
 }
