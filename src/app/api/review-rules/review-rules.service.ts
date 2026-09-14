@@ -1,56 +1,43 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { minimatch } from 'minimatch';
-import { GithubAuthService } from '@api/github/github-auth.service';
-import { GithubApiClient } from '@api/github/github-api.client';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '@shared/database/prisma.service';
 
 export interface ReviewRule {
   id: string;
   text: string;
   /** Glob matched against changed file paths. Null = applies to every file in the repo. */
   pattern: string | null;
-  source: 'manual' | 'pr-comment';
+  source: string;
   createdAt: string;
 }
 
 export interface CreateReviewRuleInput {
   text: string;
   pattern?: string | null;
-  source?: 'manual' | 'pr-comment';
+  source?: string;
 }
 
-// Committed into the target repo itself (not this app's database) so rules
-// travel with the repo, are visible/diffable in normal PRs, and don't need
-// a "which repos has this user configured" table of our own.
-const RULES_FILE_PATH = '.pr-review/rules.json';
 const MAX_RULES_IN_PROMPT = 20;
 const MAX_RULE_TEXT_CHARS = 300;
 
 /**
- * Reads and writes the per-repo custom review rules file
- * (`.pr-review/rules.json`) that AiReviewService injects into the review
- * prompt. Rules are plain repo content, not app state — creating one is a
- * real commit under the connected GitHub account.
+ * Custom AI review rules, scoped by (userId, repositoryFullName) — a rule
+ * applies to every PR in that repo, not just the one it was created from.
+ * All rules for a given (user, repo) live in a single row as a JSON array
+ * (mirroring the original .pr-review/rules.json shape) rather than one row
+ * per rule.
  */
 @Injectable()
 export class ReviewRulesService {
-  private readonly logger = new Logger(ReviewRulesService.name);
+  constructor(private readonly prisma: PrismaService) {}
 
-  constructor(
-    private readonly githubAuth: GithubAuthService,
-    private readonly githubApi: GithubApiClient,
-  ) {}
-
-  /** Best-effort read — a missing or malformed rules file degrades to [] rather than failing the caller. */
   async listRules(userId: string, repositoryFullName: string): Promise<ReviewRule[]> {
-    const accessToken = await this.resolveToken(userId);
-    try {
-      const raw = await this.githubApi.getFileContent(accessToken, repositoryFullName, RULES_FILE_PATH);
-      return raw ? this.parseRules(raw) : [];
-    } catch (err) {
-      this.logger.warn(`Failed to load review rules for ${repositoryFullName}: ${(err as Error).message}`);
-      return [];
-    }
+    const row = await this.prisma.reviewRule.findUnique({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+    });
+    return this.parseRules(JSON.stringify(row?.rules ?? []));
   }
 
   /** A rule with no pattern applies everywhere; otherwise it must glob-match at least one changed file. */
@@ -60,7 +47,7 @@ export class ReviewRulesService {
     );
   }
 
-  /** Renders matched rules as a prompt section, capped so a large rules file can't blow the token budget. */
+  /** Renders matched rules as a prompt section, capped so a large rule set can't blow the token budget. */
   formatForPrompt(rules: ReviewRule[]): string {
     if (!rules.length) return '';
 
@@ -73,11 +60,12 @@ export class ReviewRulesService {
     return shown.join('\n') + more;
   }
 
-  /** Appends a rule to the repo's rules file (creating it if needed) and commits the change via the Contents API. */
+  /** Appends to the single (userId, repositoryFullName) row, creating it on first use. */
   async addRule(userId: string, repositoryFullName: string, input: CreateReviewRuleInput): Promise<ReviewRule> {
-    const accessToken = await this.resolveToken(userId);
-    const existing = await this.githubApi.getFileMeta(accessToken, repositoryFullName, RULES_FILE_PATH);
-    const rules = existing ? this.parseRules(existing.content, { strict: true }) : [];
+    const existing = await this.prisma.reviewRule.findUnique({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+    });
+    const rules = this.parseRules(JSON.stringify(existing?.rules ?? []));
 
     const rule: ReviewRule = {
       id: randomUUID().slice(0, 8),
@@ -88,50 +76,20 @@ export class ReviewRulesService {
     };
     rules.push(rule);
 
-    await this.githubApi.upsertFileContent(
-      accessToken,
-      repositoryFullName,
-      RULES_FILE_PATH,
-      `${JSON.stringify({ rules }, null, 2)}\n`,
-      `Add review rule: ${rule.text.slice(0, 72)}`,
-      { sha: existing?.sha },
-    );
+    await this.prisma.reviewRule.upsert({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+      create: { userId, repositoryFullName, rules: rules as unknown as Prisma.InputJsonValue },
+      update: { rules: rules as unknown as Prisma.InputJsonValue },
+    });
 
     return rule;
   }
 
-  private async resolveToken(userId: string): Promise<string> {
-    const accessToken = await this.githubAuth.getDecryptedToken(userId);
-    if (!accessToken) {
-      throw new BadRequestException('No connected GitHub account found for this user.');
-    }
-    return accessToken;
-  }
+  /** Defensive against a hand-edited or legacy-shaped JSON blob — malformed entries are dropped, not thrown on. */
+  private parseRules(raw: unknown): ReviewRule[] {
+    if (!Array.isArray(raw)) return [];
 
-  /**
-   * `strict` is used on the write path: invalid JSON there means we can't
-   * safely determine what's already in the file, so we refuse to guess and
-   * silently overwrite it — the caller must fix the file manually first.
-   * The read path is more forgiving since it only ever degrades to [].
-   */
-  private parseRules(raw: string, options: { strict?: boolean } = {}): ReviewRule[] {
-    let data: unknown;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      if (options.strict) {
-        throw new BadRequestException(
-          `${RULES_FILE_PATH} in this repo contains invalid JSON and can't be updated automatically. Fix it manually first.`,
-        );
-      }
-      this.logger.warn(`${RULES_FILE_PATH} contains invalid JSON — ignoring it.`);
-      return [];
-    }
-
-    const list = (data as { rules?: unknown })?.rules;
-    if (!Array.isArray(list)) return [];
-
-    return list
+    return raw
       .filter(
         (entry): entry is Record<string, unknown> =>
           typeof entry === 'object' &&
@@ -143,7 +101,7 @@ export class ReviewRulesService {
         id: typeof entry.id === 'string' ? entry.id : randomUUID().slice(0, 8),
         text: entry.text as string,
         pattern: typeof entry.pattern === 'string' && entry.pattern.trim() ? entry.pattern : null,
-        source: entry.source === 'pr-comment' ? 'pr-comment' : 'manual',
+        source: typeof entry.source === 'string' ? entry.source : 'manual',
         createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : new Date(0).toISOString(),
       }));
   }
