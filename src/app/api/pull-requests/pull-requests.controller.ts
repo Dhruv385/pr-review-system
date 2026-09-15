@@ -8,6 +8,7 @@ import { ReviewsService } from '@api/reviews/reviews.service';
 import { AiReviewService } from '@api/ai-review/ai-review.service';
 import { ReviewRulesService } from '@api/review-rules/review-rules.service';
 import { PullRequestQueryDto } from './dto/pull-request-query.dto';
+import { RepositoryPullRequestsListResponseDto } from './dto/repository-pull-requests-response.dto';
 import { CreateReviewRuleDto } from '@api/review-rules/dto/create-review-rule.dto';
 import { buildPaginationMeta } from '@utils/pagination.util';
 
@@ -49,6 +50,35 @@ export class PullRequestsController {
       query.limit,
     );
     return { pullRequests: items, meta: buildPaginationMeta(query.page, query.limit, total) };
+  }
+
+  // GET /pull-requests/by-repository?platform=GITHUB&forceSync=true
+  // Same underlying data as GET /pull-requests, grouped by repository instead
+  // of one flat list. Registered before GET /pull-requests/:id so "by-repository"
+  // is never swallowed as an :id.
+  @ApiOperation({
+    summary: "List the authenticated user's pull requests grouped by repository",
+    description:
+      'Same sync-then-fetch behavior as GET /pull-requests, but grouped by repository. Repositories are ' +
+      'ordered by their own most recently updated pull request (latest-active repo first); pull requests ' +
+      'within each repository are also latest first. Pagination (page/limit) applies to the list of ' +
+      'repositories — every pull request for a repository on the current page is included, uncapped.',
+  })
+  @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
+  @ApiQuery({ name: 'forceSync', required: false, type: Boolean, description: 'Bypass the staleness check and sync now' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Repository page number (1-indexed, default 1)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Repositories per page (default 20, max 100)' })
+  @ApiResponse({ status: 200, description: 'Repositories with their pull requests retrieved successfully', type: RepositoryPullRequestsListResponseDto })
+  @Get('by-repository')
+  async findAllGroupedByRepository(@CurrentUser() user: IUser, @Query() query: PullRequestQueryDto) {
+    const { items, total } = await this.pullRequestsService.findAllGroupedByRepository(
+      user.id,
+      query.platform as Platform | undefined,
+      query.forceSync,
+      query.page,
+      query.limit,
+    );
+    return { repositories: items, meta: buildPaginationMeta(query.page, query.limit, total) };
   }
 
   // GET /pull-requests/:id
