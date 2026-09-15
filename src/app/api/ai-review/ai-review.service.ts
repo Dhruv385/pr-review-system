@@ -297,6 +297,28 @@ export class AiReviewService {
     }
   }
 
+  /**
+   * Small local models occasionally get stuck reasoning in a loop, repeating
+   * the same line dozens of times instead of producing a real answer — a
+   * failure mode with no useful signal in it, and it must never be posted to
+   * GitHub as if it were a real review. Flags output where a single line
+   * (ignoring code-fence markers and short/blank lines) repeats often enough
+   * that it can't plausibly be legitimate review content.
+   */
+  private isDegenerateOutput(text: string): boolean {
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 10 && !l.startsWith('```'));
+    if (lines.length < 20) return false;
+
+    const counts = new Map<string, number>();
+    for (const line of lines) counts.set(line, (counts.get(line) ?? 0) + 1);
+    const mostRepeated = Math.max(...counts.values());
+
+    return mostRepeated >= 8 || mostRepeated / lines.length > 0.3;
+  }
+
   private async generateReview(
     prTitle: string,
     diff: string,
@@ -339,6 +361,14 @@ export class AiReviewService {
             // avoiding the degenerate repetition some models fall into at
             // temperature 0.
             temperature: 0.2,
+            // gpt-oss-20b occasionally gets stuck restating the same
+            // reasoning line dozens of times instead of producing a real
+            // answer, especially on a longer, multi-section prompt like this
+            // one. Penalizing repeated tokens makes that loop less likely to
+            // start in the first place; isDegenerateOutput() below is the
+            // backstop for when it happens anyway.
+            frequency_penalty: 0.4,
+            presence_penalty: 0.2,
             // GPT-OSS is a reasoning model — it spends tokens "thinking" in a
             // separate field before writing the final answer. Without this,
             // a tight max_tokens budget can be fully consumed by reasoning,
@@ -367,6 +397,12 @@ export class AiReviewService {
       const text = data?.choices?.[0]?.message?.content || data?.choices?.[0]?.message?.reasoning;
       if (!text) {
         throw new Error('Empty response from Groq');
+      }
+      if (this.isDegenerateOutput(text)) {
+        this.logger.error(
+          `Groq returned a degenerate/repetitive response (${text.length} chars) — rejecting it rather than posting it as a review.`,
+        );
+        throw new Error('Degenerate response from Groq');
       }
       return text;
     } catch (err) {
