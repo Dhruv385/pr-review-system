@@ -4,15 +4,15 @@ import { Platform } from '@app/interfaces/pr-review.interfaces';
 import { PullRequestResponseDto } from './pull-request-response.dto';
 
 export class RepositoryPullRequestsDto {
-  @ApiProperty({ example: 'owner/repo-name' })
+  @ApiProperty({ example: 'owner/repo-name', description: 'Full repository name in the form owner/repo' })
   @Expose()
   repositoryFullName!: string;
 
-  @ApiProperty({ example: 'repo-name' })
+  @ApiProperty({ example: 'repo-name', description: 'Repository name' })
   @Expose()
   repositoryName!: string;
 
-  @ApiProperty({ enum: ['GITHUB', 'GITLAB'] })
+  @ApiProperty({ enum: ['GITHUB', 'GITLAB'], description: 'Platform' })
   @Expose()
   platform!: Platform;
 

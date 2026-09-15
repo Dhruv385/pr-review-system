@@ -66,8 +66,8 @@ export class PullRequestsController {
   })
   @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Filter by platform' })
   @ApiQuery({ name: 'forceSync', required: false, type: Boolean, description: 'Bypass the staleness check and sync now' })
-  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Repository page number (1-indexed, default 1)' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Repositories per page (default 20, max 100)' })
+  @ApiQuery({ name: 'page', required: false, type: Number, description: 'Repository page number (1-indexed, default 1)', default: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Repositories per page (default 20, max 100)', default: 20 })
   @ApiResponse({ status: 200, description: 'Repositories with their pull requests retrieved successfully', type: RepositoryPullRequestsListResponseDto })
   @Get('by-repository')
   async findAllGroupedByRepository(@CurrentUser() user: IUser, @Query() query: PullRequestQueryDto) {
