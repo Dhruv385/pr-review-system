@@ -6,7 +6,7 @@ import { AxiosError } from 'axios';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { GithubAuthService } from '@api/github/github-auth.service';
-import { GithubApiClient, GithubPullFile } from '@api/github/github-api.client';
+import { GithubApiClient, GithubPullFile, GithubReview } from '@api/github/github-api.client';
 import { GithubService } from '@api/github/github.service';
 import { ReviewRulesService, ReviewRule } from '@api/review-rules/review-rules.service';
 
@@ -18,16 +18,23 @@ const SYSTEM_PROMPT_PATH = join(__dirname, 'prompts', 'review-system-prompt.md')
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-70b-versatile is enterprise-only now
-const MAX_COMPLETION_TOKENS = 4000;
+const MAX_COMPLETION_TOKENS = 4500;
 // Groq's free tier caps at 8000 tokens/minute *total* (prompt + completion).
 // Kept well under that with margin: ~4 chars/token for diff text, plus the
-// system prompt, plus the project/PR context, plus MAX_COMPLETION_TOKENS
-// reserved for the response. Trimmed down from the diff-only budget to make
-// room for the context sections below.
-const MAX_DIFF_CHARS = 10_000;
+// system prompt, plus the project/PR/rules/previous-findings context, plus
+// MAX_COMPLETION_TOKENS reserved for the response. Trimmed down from the
+// diff-only budget to make room for the context sections below.
+const MAX_DIFF_CHARS = 9_000;
 const MAX_DEPENDENCIES_LISTED = 15;
 const MAX_FILES_LISTED = 30;
 const MAX_DESCRIPTION_CHARS = 800;
+const MAX_PREVIOUS_FINDINGS_CHARS = 3_000;
+
+// Appended to every AI-generated review body (invisible in rendered
+// markdown) so a later review of the same PR can reliably find its own
+// prior output among GitHub's review list — human reviews from the same
+// connected account never carry this marker.
+const AI_REVIEW_MARKER = '<!-- pr-review-system:ai-review -->';
 
 interface PullRequestRef {
   repositoryFullName: string;
@@ -73,9 +80,9 @@ export class AiReviewService {
     }
 
     // Best-effort enrichment so the review reflects the actual project, PR,
-    // and any team-authored rules — a failure here must never block the
-    // review itself.
-    const [projectContext, files, rules] = await Promise.all([
+    // any team-authored rules, and any unresolved findings from the last AI
+    // review of this same PR — a failure here must never block the review itself.
+    const [projectContext, files, rules, previousReviews] = await Promise.all([
       this.gatherProjectContext(accessToken, pr.repositoryFullName),
       this.githubApi.listPullRequestFiles(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
         this.logger.warn(
@@ -87,19 +94,26 @@ export class AiReviewService {
         this.logger.warn(`Failed to load review rules for ${pr.repositoryFullName}: ${(err as Error).message}`);
         return [] as ReviewRule[];
       }),
+      this.githubApi.listReviews(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
+        this.logger.warn(
+          `Failed to list previous reviews for ${pr.repositoryFullName}#${pr.number}: ${(err as Error).message}`,
+        );
+        return [] as GithubReview[];
+      }),
     ]);
     const prContext = this.formatPrContext(pr, files);
     const rulesContext = this.reviewRules.formatForPrompt(
       this.reviewRules.matchRules(rules, files.map((f) => f.filename)),
     );
+    const previousFindingsContext = this.formatPreviousFindings(previousReviews);
 
-    const body = await this.generateReview(pr.title, diff, projectContext, prContext, rulesContext);
+    const body = await this.generateReview(pr.title, diff, projectContext, prContext, rulesContext, previousFindingsContext);
 
     const posted = await this.githubApi.submitReview(accessToken, pr.repositoryFullName, pr.number, {
-      body,
+      body: `${body}\n\n${AI_REVIEW_MARKER}`,
       event: 'COMMENT',
     });
-    
+
     try {
       await this.githubService.syncForUser(userId);
     } catch (err) {
@@ -107,6 +121,26 @@ export class AiReviewService {
     }
 
     return { body, githubReviewUrl: posted.html_url };
+  }
+
+  /**
+   * Finds this app's own most recent AI review of the PR (identified by
+   * AI_REVIEW_MARKER, so a human review from the same connected account is
+   * never mistaken for one) and returns its body, marker stripped, capped
+   * defensively. Returns '' if there is none yet.
+   */
+  private formatPreviousFindings(reviews: GithubReview[]): string {
+    const aiReviews = reviews
+      .filter((r) => r.body?.includes(AI_REVIEW_MARKER))
+      .sort((a, b) => new Date(b.submitted_at ?? 0).getTime() - new Date(a.submitted_at ?? 0).getTime());
+
+    const latest = aiReviews[0]?.body;
+    if (!latest) return '';
+
+    const cleaned = latest.replace(AI_REVIEW_MARKER, '').trim();
+    return cleaned.length > MAX_PREVIOUS_FINDINGS_CHARS
+      ? `${cleaned.slice(0, MAX_PREVIOUS_FINDINGS_CHARS)}\n\n... (truncated)`
+      : cleaned;
   }
 
   /**
@@ -269,6 +303,7 @@ export class AiReviewService {
     projectContext: string,
     prContext: string,
     rulesContext: string,
+    previousFindingsContext: string,
   ): Promise<string> {
     const apiKey = this.env.AI.GROQ_API_KEY;
     if (!apiKey) {
@@ -284,6 +319,7 @@ export class AiReviewService {
       projectContext && `## Project context\n${projectContext}`,
       rulesContext && `## Team review rules\n${rulesContext}`,
       `## Pull request context\nTitle: ${prTitle}${prContext ? `\n${prContext}` : ''}`,
+      previousFindingsContext && `## Previous AI review findings\n${previousFindingsContext}`,
     ]
       .filter(Boolean)
       .join('\n\n');
@@ -297,6 +333,12 @@ export class AiReviewService {
           {
             model: this.env.AI.GROQ_MODEL ?? DEFAULT_MODEL,
             max_tokens: MAX_COMPLETION_TOKENS,
+            // Low, not zero: keeps output deterministic and exhaustive run to
+            // run (the original complaint was that reruns on the same PR each
+            // surfaced a different single issue instead of the full set) while
+            // avoiding the degenerate repetition some models fall into at
+            // temperature 0.
+            temperature: 0.2,
             // GPT-OSS is a reasoning model — it spends tokens "thinking" in a
             // separate field before writing the final answer. Without this,
             // a tight max_tokens budget can be fully consumed by reasoning,
