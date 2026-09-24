@@ -208,6 +208,18 @@ export class GithubApiClient {
     });
   }
 
+  /** SHA of the PR's head commit — the ref to read changed files' *current* full content at (not the base branch). */
+  async getPullRequestHeadSha(accessToken: string, fullName: string, prNumber: number): Promise<string> {
+    try {
+      const { data } = await firstValueFrom(
+        this.http.get(`/repos/${fullName}/pulls/${prNumber}`, this.axiosConfig(accessToken)),
+      );
+      return data.head.sha;
+    } catch (err) {
+      mapProviderError(err, 'GitHub');
+    }
+  }
+
   /**
    * Content + blob sha of a file at a given ref, or null if it doesn't exist.
    * The sha is required by the Contents API to update an existing file —

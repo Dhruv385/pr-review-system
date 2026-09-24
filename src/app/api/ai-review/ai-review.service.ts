@@ -21,14 +21,21 @@ const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-7
 const MAX_COMPLETION_TOKENS = 4500;
 // Groq's free tier caps at 8000 tokens/minute *total* (prompt + completion).
 // Kept well under that with margin: ~4 chars/token for diff text, plus the
-// system prompt, plus the project/PR/rules/previous-findings context, plus
-// MAX_COMPLETION_TOKENS reserved for the response. Trimmed down from the
-// diff-only budget to make room for the context sections below.
-const MAX_DIFF_CHARS = 9_000;
+// system prompt, plus the project/PR/rules/previous-findings/full-file
+// context, plus MAX_COMPLETION_TOKENS reserved for the response. Trimmed
+// down from the diff-only budget to make room for the context sections below.
+const MAX_DIFF_CHARS = 8_000;
 const MAX_DEPENDENCIES_LISTED = 15;
 const MAX_FILES_LISTED = 30;
 const MAX_DESCRIPTION_CHARS = 800;
 const MAX_PREVIOUS_FINDINGS_CHARS = 3_000;
+// A diff hunk alone can't prove a changed/removed symbol (e.g. an import) is
+// unused elsewhere in the file — only the full file can. Fetched for a small,
+// budget-capped subset of changed files (smallest diffs first, since those
+// are cheapest and least likely to already be fully visible in the diff).
+const MAX_FULL_FILE_FETCH_COUNT = 4;
+const MAX_FULL_FILE_CHARS = 1_200;
+const MAX_FULL_FILE_CONTEXT_CHARS = 3_000;
 
 // Appended to every AI-generated review body (invisible in rendered
 // markdown) so a later review of the same PR can reliably find its own
@@ -82,7 +89,7 @@ export class AiReviewService {
     // Best-effort enrichment so the review reflects the actual project, PR,
     // any team-authored rules, and any unresolved findings from the last AI
     // review of this same PR — a failure here must never block the review itself.
-    const [projectContext, files, rules, previousReviews] = await Promise.all([
+    const [projectContext, files, rules, previousReviews, headSha] = await Promise.all([
       this.gatherProjectContext(accessToken, pr.repositoryFullName),
       this.githubApi.listPullRequestFiles(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
         this.logger.warn(
@@ -100,14 +107,31 @@ export class AiReviewService {
         );
         return [] as GithubReview[];
       }),
+      this.githubApi.getPullRequestHeadSha(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
+        this.logger.warn(
+          `Failed to fetch head ref for ${pr.repositoryFullName}#${pr.number}: ${(err as Error).message}`,
+        );
+        return null;
+      }),
     ]);
     const prContext = this.formatPrContext(pr, files);
     const rulesContext = this.reviewRules.formatForPrompt(
       this.reviewRules.matchRules(rules, files.map((f) => f.filename)),
     );
     const previousFindingsContext = this.formatPreviousFindings(previousReviews);
+    const fullFileContext = headSha
+      ? await this.gatherFullFileContents(accessToken, pr.repositoryFullName, headSha, files)
+      : '';
 
-    const body = await this.generateReview(pr.title, diff, projectContext, prContext, rulesContext, previousFindingsContext);
+    const body = await this.generateReview(
+      pr.title,
+      diff,
+      projectContext,
+      prContext,
+      rulesContext,
+      previousFindingsContext,
+      fullFileContext,
+    );
 
     const posted = await this.githubApi.submitReview(accessToken, pr.repositoryFullName, pr.number, {
       body: `${body}\n\n${AI_REVIEW_MARKER}`,
@@ -284,6 +308,49 @@ export class AiReviewService {
   }
 
   /**
+   * Fetches full current content (at the PR's head commit) for a small,
+   * budget-capped subset of changed files, so the reviewer can check whether
+   * a changed or removed symbol (e.g. an import) is genuinely unused
+   * elsewhere in the file instead of guessing from the diff hunk alone.
+   * Smallest diffs first — cheapest to include and least likely to already
+   * be fully visible in the diff itself. Best-effort throughout: a failed
+   * fetch for one file just drops that file, never fails the whole review.
+   */
+  private async gatherFullFileContents(
+    accessToken: string,
+    fullName: string,
+    headSha: string,
+    files: GithubPullFile[],
+  ): Promise<string> {
+    const candidates = [...files]
+      .filter((f) => f.status !== 'removed')
+      .sort((a, b) => a.additions + a.deletions - (b.additions + b.deletions))
+      .slice(0, MAX_FULL_FILE_FETCH_COUNT);
+
+    const sections: string[] = [];
+    let budgetLeft = MAX_FULL_FILE_CONTEXT_CHARS;
+
+    for (const file of candidates) {
+      if (budgetLeft <= 0) break;
+
+      const content = await this.githubApi
+        .getFileContent(accessToken, fullName, file.filename, headSha)
+        .catch((err) => {
+          this.logger.warn(`Failed to fetch full content for ${file.filename}: ${(err as Error).message}`);
+          return null;
+        });
+      if (!content) continue;
+
+      const perFileCap = Math.min(MAX_FULL_FILE_CHARS, budgetLeft);
+      const clipped = content.length > perFileCap ? `${content.slice(0, perFileCap)}\n... (truncated)` : content;
+      sections.push(`### ${file.filename}\n\`\`\`\n${clipped}\n\`\`\``);
+      budgetLeft -= clipped.length;
+    }
+
+    return sections.join('\n\n');
+  }
+
+  /**
    * Loads the reviewer system prompt from disk on every call — deliberately
    * not cached, so editing prompts/review-system-prompt.md takes effect on
    * the next review with no code change, rebuild, or restart required.
@@ -326,6 +393,7 @@ export class AiReviewService {
     prContext: string,
     rulesContext: string,
     previousFindingsContext: string,
+    fullFileContext: string,
   ): Promise<string> {
     const apiKey = this.env.AI.GROQ_API_KEY;
     if (!apiKey) {
@@ -342,6 +410,8 @@ export class AiReviewService {
       rulesContext && `## Team review rules\n${rulesContext}`,
       `## Pull request context\nTitle: ${prTitle}${prContext ? `\n${prContext}` : ''}`,
       previousFindingsContext && `## Previous AI review findings\n${previousFindingsContext}`,
+      fullFileContext &&
+        `## Full file contents (current, at the PR head — use to verify usage before flagging missing/unused symbols)\n${fullFileContext}`,
     ]
       .filter(Boolean)
       .join('\n\n');
