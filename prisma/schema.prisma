@@ -1,122 +1,172 @@
 generator client {
-    provider = "prisma-client-js"
+  provider = "prisma-client-js"
 }
 
 datasource db {
-    provider = "postgresql"
-    url      = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 enum Platform {
-    GITHUB
-    GITLAB
+  GITHUB
+  GITLAB
 }
 
 enum PullRequestStatus {
-    OPEN
-    CLOSED
-    MERGED
+  OPEN
+  CLOSED
+  MERGED
 }
 
 enum ReviewState {
-    APPROVED
-    CHANGES_REQUESTED
-    COMMENTED
-    PENDING
-    DISMISSED
+  APPROVED
+  CHANGES_REQUESTED
+  COMMENTED
+  PENDING
+  DISMISSED
+}
+
+enum AiReviewRating {
+  ACCURATE
+  PARTIALLY_ACCURATE
+  INACCURATE
 }
 
 model User {
-    id               String         @id @default(cuid())
-    email            String         @unique
-    passwordHash     String
-    platform         Platform
-    platformUsername String
-    name             String?
-    githubAccount    GithubAccount?
-    gitlabAccount    GitlabAccount?
-    pullRequests     PullRequest[]
-    reviewRules      ReviewRule[]
-    createdAt        DateTime       @default(now())
-    updatedAt        DateTime       @updatedAt
+  id                    String                 @id @default(cuid())
+  email                 String                 @unique
+  passwordHash          String
+  platform              Platform
+  platformUsername      String
+  name                  String?
+  githubAccount         GithubAccount?
+  gitlabAccount         GitlabAccount?
+  pullRequests          PullRequest[]
+  reviewRules           ReviewRule[]
+  aiReviewFeedback      AiReviewFeedback[]
+  repositoryAssessments RepositoryAssessment[]
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 
-    @@unique([platform, platformUsername])
+  @@unique([platform, platformUsername])
 }
 
 model GithubAccount {
-    id           String   @id @default(cuid())
-    userId       String   @unique
-    githubId     String   @unique
-    username     String
-    accessToken  String
-    tokenRevoked Boolean  @default(false)
-    createdAt    DateTime @default(now())
-    updatedAt    DateTime @updatedAt
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  githubId     String   @unique
+  username     String
+  accessToken  String
+  tokenRevoked Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-    @@map("github_accounts")
+  @@map("github_accounts")
 }
 
 model GitlabAccount {
-    id           String   @id @default(cuid())
-    userId       String   @unique
-    gitlabId     String   @unique
-    username     String
-    accessToken  String
-    tokenRevoked Boolean  @default(false)
-    createdAt    DateTime @default(now())
-    updatedAt    DateTime @updatedAt
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  gitlabId     String   @unique
+  username     String
+  accessToken  String
+  tokenRevoked Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-    @@map("gitlab_accounts")
+  @@map("gitlab_accounts")
 }
 
 model PullRequest {
-    id                 String            @id @default(cuid())
-    userId             String
-    externalId         String
-    platform           Platform
-    number             Int
-    title              String
-    description        String?
-    repositoryId       String
-    repositoryName     String
-    repositoryFullName String
-    status             PullRequestStatus
-    authorName         String
-    url                String
-    lastSyncedAt       DateTime?
-    createdAt          DateTime          @default(now())
-    updatedAt          DateTime          @updatedAt
+  id                 String            @id @default(cuid())
+  userId             String
+  externalId         String
+  platform           Platform
+  number             Int
+  title              String
+  description        String?
+  repositoryId       String
+  repositoryName     String
+  repositoryFullName String
+  status             PullRequestStatus
+  authorName         String
+  url                String
+  lastSyncedAt       DateTime?
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-    user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-    reviews Review[]
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reviews Review[]
 
-    @@unique([userId, platform, externalId], name: "userId_platform_externalId")
-    @@index([userId])
-    @@index([userId, platform])
-    @@map("pull_requests")
+  @@unique([userId, platform, externalId], name: "userId_platform_externalId")
+  @@index([userId])
+  @@index([userId, platform])
+  @@map("pull_requests")
 }
 
 model Review {
-    id                String      @id @default(cuid())
-    externalId        String
-    pullRequestId     String
-    reviewerName      String
-    reviewerAvatarUrl String?
-    state             ReviewState
-    comment           String?
-    submittedAt       DateTime?
-    createdAt         DateTime    @default(now())
-    updatedAt         DateTime    @updatedAt
+  id                String      @id @default(cuid())
+  externalId        String
+  pullRequestId     String
+  reviewerName      String
+  reviewerAvatarUrl String?
+  state             ReviewState
+  comment           String?
+  submittedAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 
-    pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+  pullRequest PullRequest        @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+  feedback    AiReviewFeedback[]
 
-    @@unique([pullRequestId, externalId], name: "pullRequestId_externalId")
-    @@index([pullRequestId])
-    @@map("reviews")
+  @@unique([pullRequestId, externalId], name: "pullRequestId_externalId")
+  @@index([pullRequestId])
+  @@map("reviews")
+}
+
+// One rating (+ optional note) per (user, review) — re-ratable via upsert.
+// reviewId points at the Review row created when the AI's own posted review
+// gets synced back from the provider; that row's `comment` carries
+// AI_REVIEW_MARKER, so feedback is naturally scoped to AI-authored reviews
+// only (enforced in ReviewsService, not at the schema level).
+model AiReviewFeedback {
+  id        String         @id @default(cuid())
+  userId    String
+  reviewId  String
+  rating    AiReviewRating
+  notes     String?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, reviewId])
+  @@index([reviewId])
+  @@map("ai_review_feedback")
+}
+
+// Latest AI-generated assessment of a repo's architecture/conventions, used
+// to seed that repo's ReviewRule config for projects taken over mid-way
+// (e.g. from another team/vendor) where the default prompt would otherwise
+// produce irrelevant findings. One row per (user, repo), latest wins.
+model RepositoryAssessment {
+  id                 String   @id @default(cuid())
+  userId             String
+  repositoryFullName String
+  report             String
+  suggestedConfig    Json?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, repositoryFullName])
+  @@map("repository_assessments")
 }
 
 // Custom AI review rules, scoped by repo (not PR) since a rule applies to
@@ -126,15 +176,25 @@ model Review {
 // rule for a given (user, repo) as a JSON array, mirroring the original
 // .pr-review/rules.json shape, rather than one row per rule.
 model ReviewRule {
-    id                 String   @id @default(cuid())
-    userId             String
-    repositoryFullName String
-    rules              Json     @default("[]")
-    createdAt          DateTime @default(now())
-    updatedAt          DateTime @updatedAt
+  id                 String   @id @default(cuid())
+  userId             String
+  repositoryFullName String
+  rules              Json     @default("[]")
+  // Structured project-level config (discussion: "review prompt should be
+  // dynamic and configurable at the project level"). Additive alongside
+  // `rules` — architectureNotes/conventions are freeform guidance text,
+  // focusAreas are specific things to prioritize, excludePatterns are
+  // globs enforced in code (ai-review.service.ts) to fully skip matching
+  // files from review, not just a prompt hint.
+  architectureNotes  String?
+  conventions        String?
+  focusAreas         Json     @default("[]")
+  excludePatterns    Json     @default("[]")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
-    user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-    @@unique([userId, repositoryFullName])
-    @@map("review_rules")
+  @@unique([userId, repositoryFullName])
+  @@map("review_rules")
 }

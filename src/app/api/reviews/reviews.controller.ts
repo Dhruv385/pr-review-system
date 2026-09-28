@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { Platform } from '@app/interfaces/pr-review.interfaces';
 import { JwtAuthGuard } from '@guards/jwt';
@@ -6,6 +6,8 @@ import { CurrentUser } from '@decorators/current-user.decorator';
 import { IUser } from '@app/interfaces/pr-review.interfaces';
 import { ReviewsService } from './reviews.service';
 import { ReviewQueryDto } from './dto/review-query.dto';
+import { SubmitReviewFeedbackDto } from './dto/submit-review-feedback.dto';
+import { AccuracyQueryDto } from './dto/accuracy-query.dto';
 import { buildPaginationMeta } from '@utils/pagination.util';
 
 @ApiTags('Reviews')
@@ -41,5 +43,44 @@ export class ReviewsController {
   @Get(':reviewId/pull-request')
   async getPullRequest(@CurrentUser() user: IUser, @Param('reviewId') reviewId: string) {
     return this.reviewsService.getPullRequestForReview(user.id, reviewId);
+  }
+
+  // GET /reviews/accuracy?repositoryFullName=owner/repo&platform=GITHUB
+  // Registered before :reviewId/pull-request-shaped routes are relevant so
+  // "accuracy" is never swallowed as a :reviewId.
+  @ApiOperation({
+    summary: 'Get the accuracy percentage of AI-generated reviews, optionally scoped to one repo/platform',
+    description: 'Aggregates feedback submitted via POST :reviewId/feedback. accuracyPercent = accurate / total * 100.',
+  })
+  @ApiQuery({ name: 'repositoryFullName', required: false, description: 'Narrow to one repository, e.g. "owner/repo"' })
+  @ApiQuery({ name: 'platform', required: false, enum: ['GITHUB', 'GITLAB'], description: 'Narrow to one platform' })
+  @ApiResponse({ status: 200, description: 'Accuracy summary retrieved successfully (zeros if no feedback yet)' })
+  @Get('accuracy')
+  async getAccuracy(@CurrentUser() user: IUser, @Query() query: AccuracyQueryDto) {
+    return this.reviewsService.getAccuracy(user.id, {
+      repositoryFullName: query.repositoryFullName,
+      platform: query.platform as Platform | undefined,
+    });
+  }
+
+  // POST /reviews/:reviewId/feedback
+  @ApiOperation({
+    summary: 'Rate the accuracy of an AI-generated review',
+    description:
+      'One rating (+ optional note) per (user, review) — resubmitting overwrites the previous rating. ' +
+      'Only valid for AI-generated reviews.',
+  })
+  @ApiParam({ name: 'reviewId', description: 'Review ID' })
+  @ApiResponse({ status: 201, description: 'Feedback recorded successfully' })
+  @ApiResponse({ status: 400, description: 'This review was not AI-generated' })
+  @ApiResponse({ status: 404, description: 'Review not found, or does not belong to the authenticated user' })
+  @Post(':reviewId/feedback')
+  async submitFeedback(
+    @CurrentUser() user: IUser,
+    @Param('reviewId') reviewId: string,
+    @Body() dto: SubmitReviewFeedbackDto,
+  ) {
+    const feedback = await this.reviewsService.submitFeedback(user.id, reviewId, dto);
+    return { feedback };
   }
 }
