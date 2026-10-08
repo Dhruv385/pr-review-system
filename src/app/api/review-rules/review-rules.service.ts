@@ -19,8 +19,30 @@ export interface CreateReviewRuleInput {
   source?: string;
 }
 
+/** Structured project-level config, additive alongside the freeform `rules` list. */
+export interface ProjectConfig {
+  architectureNotes: string | null;
+  conventions: string | null;
+  focusAreas: string[];
+  excludePatterns: string[];
+  rules: ReviewRule[];
+}
+
+export interface UpdateProjectConfigInput {
+  architectureNotes?: string | null;
+  conventions?: string | null;
+  focusAreas?: string[];
+  excludePatterns?: string[];
+}
+
 const MAX_RULES_IN_PROMPT = 20;
 const MAX_RULE_TEXT_CHARS = 300;
+const MAX_ARCHITECTURE_NOTES_CHARS = 2_000;
+const MAX_CONVENTIONS_CHARS = 2_000;
+const MAX_FOCUS_AREAS = 20;
+const MAX_FOCUS_AREA_CHARS = 100;
+const MAX_EXCLUDE_PATTERNS = 50;
+const MAX_EXCLUDE_PATTERN_CHARS = 200;
 
 /**
  * Custom AI review rules, scoped by (userId, repositoryFullName) — a rule
@@ -38,6 +60,72 @@ export class ReviewRulesService {
       where: { userId_repositoryFullName: { userId, repositoryFullName } },
     });
     return this.parseRules(JSON.stringify(row?.rules ?? []));
+  }
+
+  /** Full structured config for a (user, repo) — architecture/conventions/focus/exclusions plus the existing rule list. */
+  async getConfig(userId: string, repositoryFullName: string): Promise<ProjectConfig> {
+    const row = await this.prisma.reviewRule.findUnique({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+    });
+    return {
+      architectureNotes: row?.architectureNotes ?? null,
+      conventions: row?.conventions ?? null,
+      focusAreas: this.parseStringArray(row?.focusAreas),
+      excludePatterns: this.parseStringArray(row?.excludePatterns),
+      rules: this.parseRules(JSON.stringify(row?.rules ?? [])),
+    };
+  }
+
+  /** Upserts the structured fields only — `rules` stays managed separately via addRule. Omitted fields are left unchanged. */
+  async updateConfig(
+    userId: string,
+    repositoryFullName: string,
+    input: UpdateProjectConfigInput,
+  ): Promise<ProjectConfig> {
+    const data: Prisma.ReviewRuleUpdateInput = {};
+    if (input.architectureNotes !== undefined) {
+      data.architectureNotes = input.architectureNotes?.trim().slice(0, MAX_ARCHITECTURE_NOTES_CHARS) || null;
+    }
+    if (input.conventions !== undefined) {
+      data.conventions = input.conventions?.trim().slice(0, MAX_CONVENTIONS_CHARS) || null;
+    }
+    if (input.focusAreas !== undefined) {
+      data.focusAreas = input.focusAreas
+        .map((a) => a.trim().slice(0, MAX_FOCUS_AREA_CHARS))
+        .filter(Boolean)
+        .slice(0, MAX_FOCUS_AREAS) as unknown as Prisma.InputJsonValue;
+    }
+    if (input.excludePatterns !== undefined) {
+      data.excludePatterns = input.excludePatterns
+        .map((p) => p.trim().slice(0, MAX_EXCLUDE_PATTERN_CHARS))
+        .filter(Boolean)
+        .slice(0, MAX_EXCLUDE_PATTERNS) as unknown as Prisma.InputJsonValue;
+    }
+
+    await this.prisma.reviewRule.upsert({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+      create: {
+        userId,
+        repositoryFullName,
+        architectureNotes: (data.architectureNotes as string | null) ?? null,
+        conventions: (data.conventions as string | null) ?? null,
+        focusAreas: (data.focusAreas as Prisma.InputJsonValue) ?? [],
+        excludePatterns: (data.excludePatterns as Prisma.InputJsonValue) ?? [],
+      },
+      update: data,
+    });
+
+    return this.getConfig(userId, repositoryFullName);
+  }
+
+  /** Renders architectureNotes/conventions/focusAreas as prompt sections — excludePatterns is enforced in code, not prompted. */
+  formatConfigForPrompt(config: Pick<ProjectConfig, 'architectureNotes' | 'conventions' | 'focusAreas'>): string {
+    const parts = [
+      config.architectureNotes && `Architecture & coding standards: ${config.architectureNotes}`,
+      config.conventions && `Project conventions: ${config.conventions}`,
+      config.focusAreas.length && `Focus areas: ${config.focusAreas.join(', ')}`,
+    ].filter(Boolean);
+    return parts.join('\n');
   }
 
   /** A rule with no pattern applies everywhere; otherwise it must glob-match at least one changed file. */
@@ -104,5 +192,11 @@ export class ReviewRulesService {
         source: typeof entry.source === 'string' ? entry.source : 'manual',
         createdAt: typeof entry.createdAt === 'string' ? entry.createdAt : new Date(0).toISOString(),
       }));
+  }
+
+  /** Defensive against a hand-edited or malformed JSON blob — non-string entries are dropped, not thrown on. */
+  private parseStringArray(raw: unknown): string[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
   }
 }

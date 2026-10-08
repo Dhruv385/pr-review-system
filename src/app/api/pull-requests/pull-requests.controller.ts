@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Inject, forwardRef, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Inject, forwardRef, Param, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '@guards/jwt';
 import { CurrentUser } from '@decorators/current-user.decorator';
@@ -10,6 +10,7 @@ import { ReviewRulesService } from '@api/review-rules/review-rules.service';
 import { PullRequestQueryDto } from './dto/pull-request-query.dto';
 import { RepositoryPullRequestsListResponseDto } from './dto/repository-pull-requests-response.dto';
 import { CreateReviewRuleDto } from '@api/review-rules/dto/create-review-rule.dto';
+import { UpdateProjectConfigDto } from '@api/review-rules/dto/update-project-config.dto';
 import { buildPaginationMeta } from '@utils/pagination.util';
 
 @ApiTags('Pull Requests')
@@ -131,25 +132,59 @@ export class PullRequestsController {
     return { reviewed: true, ...result };
   }
 
+  // POST /pull-requests/:id/repo-analysis
+  @ApiOperation({
+    summary: "Analyze this PR's repo and produce an onboarding assessment + suggested review config",
+    description:
+      'For projects taken over mid-way from another team/vendor, where the default review prompt would ' +
+      'otherwise produce irrelevant findings. Produces a report plus a suggested project config; nothing is ' +
+      'applied automatically — see POST :id/repo-analysis/apply.',
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 201, description: 'Repository analyzed successfully' })
+  @ApiResponse({ status: 400, description: 'Not a GitHub pull request, or no connected GitHub account' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @ApiResponse({ status: 503, description: 'The AI provider or GitHub API is temporarily unavailable' })
+  @Post(':id/repo-analysis')
+  async analyzeRepository(@CurrentUser() user: IUser, @Param('id') id: string) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+
+    if (pullRequest.platform !== Platform.GITHUB) {
+      throw new BadRequestException('Repository analysis is currently only supported for GitHub repositories.');
+    }
+
+    return this.aiReviewService.analyzeGithubRepository(user.id, pullRequest.repositoryFullName);
+  }
+
+  // POST /pull-requests/:id/repo-analysis/apply
+  @ApiOperation({
+    summary: "Apply the latest repo analysis's suggested config to this repo's review config",
+    description:
+      'Explicit, separate confirm step — loads the most recent POST :id/repo-analysis result and writes its ' +
+      'suggested architectureNotes/conventions/focusAreas/excludePatterns into the project config.',
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 201, description: 'Suggested config applied successfully' })
+  @ApiResponse({ status: 400, description: 'No analysis found for this repo yet, or it has no suggested config' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @Post(':id/repo-analysis/apply')
+  async applyRepositoryAnalysis(@CurrentUser() user: IUser, @Param('id') id: string) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+    return this.aiReviewService.applyRepositoryAssessmentConfig(user.id, pullRequest.repositoryFullName);
+  }
+
   // GET /pull-requests/:id/rules
   @ApiOperation({
     summary: "List this PR's repo custom AI review rules",
     description:
-      "Reads .pr-review/rules.json from the PR's repository (default branch). These are the rules " +
-      "AiReviewService matches against each review's changed files and injects into the prompt.",
+      "Stored per (user, repo) and matched against each review's changed files, then injected into the AI review prompt.",
   })
   @ApiParam({ name: 'id', description: 'Pull request ID' })
   @ApiResponse({ status: 200, description: 'Rules retrieved successfully (empty array if none configured)' })
-  @ApiResponse({ status: 400, description: 'Not a GitHub pull request, or no connected GitHub account' })
   @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
   @Get(':id/rules')
   async listRules(@CurrentUser() user: IUser, @Param('id') id: string) {
     const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
-
-    if (pullRequest.platform !== Platform.GITHUB) {
-      throw new BadRequestException('Review rules are currently only supported for GitHub pull requests.');
-    }
-
     const rules = await this.reviewRulesService.listRules(user.id, pullRequest.repositoryFullName);
     return { rules };
   }
@@ -158,27 +193,52 @@ export class PullRequestsController {
   @ApiOperation({
     summary: "Add a custom AI review rule to this PR's repo",
     description:
-      "Appends to .pr-review/rules.json in the PR's repository and commits the change under the " +
-      'connected GitHub account. Scope a rule to specific files with `pattern` (a glob matched against ' +
-      "changed file paths), or omit it to apply the rule to every future review in this repo.",
+      'Scope a rule to specific files with `pattern` (a glob matched against changed file paths), or omit it ' +
+      'to apply the rule to every future review in this repo.',
   })
   @ApiParam({ name: 'id', description: 'Pull request ID' })
-  @ApiResponse({ status: 201, description: 'Rule created and committed successfully' })
-  @ApiResponse({
-    status: 400,
-    description:
-      'Not a GitHub pull request, no connected GitHub account, or the repo\'s rules file has invalid JSON',
-  })
+  @ApiResponse({ status: 201, description: 'Rule created successfully' })
   @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
   @Post(':id/rules')
   async addRule(@CurrentUser() user: IUser, @Param('id') id: string, @Body() dto: CreateReviewRuleDto) {
     const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
-
-    if (pullRequest.platform !== Platform.GITHUB) {
-      throw new BadRequestException('Review rules are currently only supported for GitHub pull requests.');
-    }
-
     const rule = await this.reviewRulesService.addRule(user.id, pullRequest.repositoryFullName, dto);
     return { rule };
+  }
+
+  // GET /pull-requests/:id/project-config
+  @ApiOperation({
+    summary: "Get this PR's repo structured review config",
+    description:
+      'Architecture notes, conventions, focus areas, and exclude patterns — the dynamic, project-level ' +
+      "review config, alongside this repo's rule list.",
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 200, description: 'Config retrieved successfully (defaults if none configured yet)' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @Get(':id/project-config')
+  async getProjectConfig(@CurrentUser() user: IUser, @Param('id') id: string) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+    return this.reviewRulesService.getConfig(user.id, pullRequest.repositoryFullName);
+  }
+
+  // PUT /pull-requests/:id/project-config
+  @ApiOperation({
+    summary: "Update this PR's repo structured review config",
+    description:
+      'Upserts architectureNotes/conventions/focusAreas/excludePatterns. Omitted fields are left unchanged; ' +
+      'the rule list is managed separately via POST :id/rules.',
+  })
+  @ApiParam({ name: 'id', description: 'Pull request ID' })
+  @ApiResponse({ status: 200, description: 'Config updated successfully' })
+  @ApiResponse({ status: 404, description: 'Pull request not found, or does not belong to the authenticated user' })
+  @Put(':id/project-config')
+  async updateProjectConfig(
+    @CurrentUser() user: IUser,
+    @Param('id') id: string,
+    @Body() dto: UpdateProjectConfigDto,
+  ) {
+    const pullRequest = await this.pullRequestsService.getOwnedPullRequestOrThrow(user.id, id);
+    return this.reviewRulesService.updateConfig(user.id, pullRequest.repositoryFullName, dto);
   }
 }

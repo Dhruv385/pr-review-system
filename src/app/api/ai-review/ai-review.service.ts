@@ -5,16 +5,23 @@ import { firstValueFrom } from 'rxjs';
 import { AxiosError } from 'axios';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
+import { minimatch } from 'minimatch';
+import { Prisma } from '@prisma/client';
+import { PrismaService } from '@shared/database/prisma.service';
 import { GithubAuthService } from '@api/github/github-auth.service';
 import { GithubApiClient, GithubPullFile, GithubReview } from '@api/github/github-api.client';
 import { GithubService } from '@api/github/github.service';
-import { ReviewRulesService, ReviewRule } from '@api/review-rules/review-rules.service';
+import { ReviewRulesService, ProjectConfig } from '@api/review-rules/review-rules.service';
 
-// Read fresh from disk on every review (not cached in memory) so editing the
+// Read fresh from disk on every call (not cached in memory) so editing the
 // wording is a content change, not a code change — no redeploy or restart
-// needed to pick it up. `assets` in nest-cli.json copies this file next to
-// the compiled service in dist/ on build.
-const SYSTEM_PROMPT_PATH = join(__dirname, 'prompts', 'review-system-prompt.md');
+// needed to pick it up. `assets` in nest-cli.json copies this directory next
+// to the compiled service in dist/ on build.
+const PROMPTS_DIR = join(__dirname, 'prompts');
+const REVIEW_SYSTEM_PROMPT_FILE = 'review-system-prompt.md';
+const REPO_ANALYSIS_PROMPT_FILE = 'repo-analysis-prompt.md';
+const MAX_ANALYSIS_COMPLETION_TOKENS = 3_000;
+const MAX_README_CHARS = 2_000;
 
 const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const DEFAULT_MODEL = 'openai/gpt-oss-20b'; // free-tier on Groq — llama-3.3-70b-versatile is enterprise-only now
@@ -41,7 +48,7 @@ const MAX_FULL_FILE_CONTEXT_CHARS = 3_000;
 // markdown) so a later review of the same PR can reliably find its own
 // prior output among GitHub's review list — human reviews from the same
 // connected account never carry this marker.
-const AI_REVIEW_MARKER = '<!-- pr-review-system:ai-review -->';
+export const AI_REVIEW_MARKER = '<!-- pr-review-system:ai-review -->';
 
 interface PullRequestRef {
   repositoryFullName: string;
@@ -53,6 +60,19 @@ interface PullRequestRef {
 export interface AiReviewResult {
   body: string;
   githubReviewUrl: string;
+}
+
+/** Structured config an LLM suggests after analyzing a repo — same shape as ReviewRulesService's UpdateProjectConfigInput. */
+interface SuggestedProjectConfig {
+  architectureNotes: string | null;
+  conventions: string | null;
+  focusAreas: string[];
+  excludePatterns: string[];
+}
+
+export interface RepositoryAssessmentResult {
+  report: string;
+  suggestedConfig: SuggestedProjectConfig | null;
 }
 
 /**
@@ -69,6 +89,7 @@ export class AiReviewService {
   constructor(
     private readonly env: EnvService,
     private readonly http: HttpService,
+    private readonly prisma: PrismaService,
     private readonly githubAuth: GithubAuthService,
     private readonly githubApi: GithubApiClient,
     private readonly githubService: GithubService,
@@ -87,9 +108,10 @@ export class AiReviewService {
     }
 
     // Best-effort enrichment so the review reflects the actual project, PR,
-    // any team-authored rules, and any unresolved findings from the last AI
-    // review of this same PR — a failure here must never block the review itself.
-    const [projectContext, files, rules, previousReviews, headSha] = await Promise.all([
+    // any team-authored rules/project config, and any unresolved findings
+    // from the last AI review of this same PR — a failure here must never
+    // block the review itself.
+    const [projectContext, rawFiles, config, previousReviews, headSha] = await Promise.all([
       this.gatherProjectContext(accessToken, pr.repositoryFullName),
       this.githubApi.listPullRequestFiles(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
         this.logger.warn(
@@ -97,9 +119,9 @@ export class AiReviewService {
         );
         return [] as GithubPullFile[];
       }),
-      this.reviewRules.listRules(userId, pr.repositoryFullName).catch((err) => {
-        this.logger.warn(`Failed to load review rules for ${pr.repositoryFullName}: ${(err as Error).message}`);
-        return [] as ReviewRule[];
+      this.reviewRules.getConfig(userId, pr.repositoryFullName).catch((err) => {
+        this.logger.warn(`Failed to load review config for ${pr.repositoryFullName}: ${(err as Error).message}`);
+        return { architectureNotes: null, conventions: null, focusAreas: [], excludePatterns: [], rules: [] } as ProjectConfig;
       }),
       this.githubApi.listReviews(accessToken, pr.repositoryFullName, pr.number).catch((err) => {
         this.logger.warn(
@@ -114,9 +136,19 @@ export class AiReviewService {
         return null;
       }),
     ]);
+
+    // excludePatterns is enforced here in code — filtering both the file
+    // list and the diff text itself — rather than left as a prompt hint the
+    // model might not reliably follow.
+    const { diff: scopedDiff, files } = this.excludeMatchedFiles(diff, rawFiles, config.excludePatterns);
+    if (!scopedDiff.trim()) {
+      throw new BadRequestException('Every changed file in this pull request is excluded from review by the project config.');
+    }
+
     const prContext = this.formatPrContext(pr, files);
+    const projectConfigContext = this.reviewRules.formatConfigForPrompt(config);
     const rulesContext = this.reviewRules.formatForPrompt(
-      this.reviewRules.matchRules(rules, files.map((f) => f.filename)),
+      this.reviewRules.matchRules(config.rules, files.map((f) => f.filename)),
     );
     const previousFindingsContext = this.formatPreviousFindings(previousReviews);
     const fullFileContext = headSha
@@ -125,8 +157,9 @@ export class AiReviewService {
 
     const body = await this.generateReview(
       pr.title,
-      diff,
+      scopedDiff,
       projectContext,
+      projectConfigContext,
       prContext,
       rulesContext,
       previousFindingsContext,
@@ -145,6 +178,143 @@ export class AiReviewService {
     }
 
     return { body, githubReviewUrl: posted.html_url };
+  }
+
+  /**
+   * Enforces `excludePatterns` in code rather than as a prompt hint the
+   * model might not reliably follow — filters excluded files out of both
+   * the changed-file list and the diff text itself (split on git's
+   * `diff --git a/... b/...` file boundaries) before anything downstream
+   * (rules matching, full-file-context, the prompt) ever sees them.
+   */
+  private excludeMatchedFiles(
+    diff: string,
+    files: GithubPullFile[],
+    excludePatterns: string[],
+  ): { diff: string; files: GithubPullFile[] } {
+    if (!excludePatterns.length) return { diff, files };
+
+    const isExcluded = (path: string) => excludePatterns.some((p) => minimatch(path, p, { dot: true }));
+    const filteredFiles = files.filter((f) => !isExcluded(f.filename));
+
+    const blocks = diff.split(/(?=^diff --git a\/.* b\/.*$)/m);
+    const filteredDiff = blocks
+      .filter((block) => {
+        const header = /^diff --git a\/.* b\/(.*)$/m.exec(block);
+        return !header || !isExcluded(header[1].trim());
+      })
+      .join('');
+
+    return { diff: filteredDiff, files: filteredFiles };
+  }
+
+  /**
+   * Analyzes a repo's architecture/conventions and produces an assessment
+   * report plus a suggested project config — for onboarding a project taken
+   * over mid-way from another team/vendor, where the default review prompt
+   * would otherwise produce irrelevant findings. Persists the latest result
+   * per (user, repo); applying it to the actual review config is a separate,
+   * explicit step (applyRepositoryAssessmentConfig) — nothing here writes to
+   * ReviewRule directly.
+   */
+  async analyzeGithubRepository(userId: string, repositoryFullName: string): Promise<RepositoryAssessmentResult> {
+    const accessToken = await this.githubAuth.getDecryptedToken(userId);
+    if (!accessToken) {
+      throw new BadRequestException('No connected GitHub account found for this user.');
+    }
+
+    const [projectContext, readme] = await Promise.all([
+      this.gatherProjectContext(accessToken, repositoryFullName),
+      this.githubApi.getFileContent(accessToken, repositoryFullName, 'README.md').catch((err) => {
+        this.logger.warn(`Failed to fetch README for ${repositoryFullName}: ${(err as Error).message}`);
+        return null;
+      }),
+    ]);
+
+    const userContent =
+      [
+        projectContext && `## Project context\n${projectContext}`,
+        readme &&
+          `## README excerpt\n${readme.length > MAX_README_CHARS ? `${readme.slice(0, MAX_README_CHARS)}\n... (truncated)` : readme}`,
+      ]
+        .filter(Boolean)
+        .join('\n\n') || 'No project context or README available for this repository.';
+
+    const systemPrompt = await this.readPromptFile(REPO_ANALYSIS_PROMPT_FILE);
+    const text = await this.callGroq(systemPrompt, userContent, MAX_ANALYSIS_COMPLETION_TOKENS);
+    const result = this.parseAnalysisOutput(text);
+
+    await this.prisma.repositoryAssessment.upsert({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+      create: {
+        userId,
+        repositoryFullName,
+        report: result.report,
+        suggestedConfig: (result.suggestedConfig as unknown as Prisma.InputJsonValue) ?? Prisma.JsonNull,
+      },
+      update: {
+        report: result.report,
+        suggestedConfig: (result.suggestedConfig as unknown as Prisma.InputJsonValue) ?? Prisma.JsonNull,
+      },
+    });
+
+    return result;
+  }
+
+  /**
+   * Applies the latest persisted repo analysis's suggested config to the
+   * repo's actual ReviewRule config — a separate, explicit step from
+   * analyzeGithubRepository so nothing gets written without a deliberate
+   * confirm call.
+   */
+  async applyRepositoryAssessmentConfig(userId: string, repositoryFullName: string): Promise<ProjectConfig> {
+    const assessment = await this.prisma.repositoryAssessment.findUnique({
+      where: { userId_repositoryFullName: { userId, repositoryFullName } },
+    });
+    if (!assessment) {
+      throw new BadRequestException('No repository analysis found for this repo yet — run analysis first.');
+    }
+
+    const suggested = assessment.suggestedConfig as unknown as SuggestedProjectConfig | null;
+    if (!suggested) {
+      throw new BadRequestException('The latest analysis for this repo has no suggested config to apply.');
+    }
+
+    return this.reviewRules.updateConfig(userId, repositoryFullName, {
+      architectureNotes: suggested.architectureNotes,
+      conventions: suggested.conventions,
+      focusAreas: suggested.focusAreas,
+      excludePatterns: suggested.excludePatterns,
+    });
+  }
+
+  /**
+   * Splits the model's output into the human-readable report and the
+   * trailing ```json suggested-config block. Parse failure (missing block,
+   * malformed JSON, wrong shape) degrades to a null suggestedConfig — the
+   * report text is still returned either way, this must never hard-fail
+   * the whole analysis.
+   */
+  private parseAnalysisOutput(text: string): RepositoryAssessmentResult {
+    const match = /```json\s*([\s\S]*?)```/.exec(text);
+    if (!match) return { report: text.trim(), suggestedConfig: null };
+
+    const report = (text.slice(0, match.index) + text.slice(match.index + match[0].length)).trim();
+    try {
+      const parsed = JSON.parse(match[1]);
+      const suggestedConfig: SuggestedProjectConfig = {
+        architectureNotes: typeof parsed.architectureNotes === 'string' ? parsed.architectureNotes : null,
+        conventions: typeof parsed.conventions === 'string' ? parsed.conventions : null,
+        focusAreas: Array.isArray(parsed.focusAreas) ? parsed.focusAreas.filter((f: unknown) => typeof f === 'string') : [],
+        excludePatterns: Array.isArray(parsed.excludePatterns)
+          ? parsed.excludePatterns.filter((p: unknown) => typeof p === 'string')
+          : [],
+      };
+      return { report, suggestedConfig };
+    } catch (err) {
+      this.logger.warn(`Failed to parse suggested config JSON from repo analysis: ${(err as Error).message}`);
+      return { report: text.trim(), suggestedConfig: null };
+    }
   }
 
   /**
@@ -351,16 +521,17 @@ export class AiReviewService {
   }
 
   /**
-   * Loads the reviewer system prompt from disk on every call — deliberately
-   * not cached, so editing prompts/review-system-prompt.md takes effect on
-   * the next review with no code change, rebuild, or restart required.
+   * Loads a prompt file from disk on every call — deliberately not cached,
+   * so editing wording in prompts/ takes effect on the next call with no
+   * code change, rebuild, or restart required.
    */
-  private async loadSystemPrompt(): Promise<string> {
+  private async readPromptFile(filename: string): Promise<string> {
+    const filePath = join(PROMPTS_DIR, filename);
     try {
-      return (await readFile(SYSTEM_PROMPT_PATH, 'utf-8')).trim();
+      return (await readFile(filePath, 'utf-8')).trim();
     } catch (err) {
-      this.logger.error(`Failed to read system prompt at ${SYSTEM_PROMPT_PATH}: ${(err as Error).message}`);
-      throw new ServiceUnavailableException('AI review is misconfigured: the reviewer prompt could not be loaded.');
+      this.logger.error(`Failed to read prompt file at ${filePath}: ${(err as Error).message}`);
+      throw new ServiceUnavailableException('AI review is misconfigured: a required prompt file could not be loaded.');
     }
   }
 
@@ -390,23 +561,18 @@ export class AiReviewService {
     prTitle: string,
     diff: string,
     projectContext: string,
+    projectConfigContext: string,
     prContext: string,
     rulesContext: string,
     previousFindingsContext: string,
     fullFileContext: string,
   ): Promise<string> {
-    const apiKey = this.env.AI.GROQ_API_KEY;
-    if (!apiKey) {
-      throw new ServiceUnavailableException(
-        'AI review is not configured. Set GROQ_API_KEY in the environment to enable it.',
-      );
-    }
-
     const truncated = diff.length > MAX_DIFF_CHARS;
     const clippedDiff = truncated ? `${diff.slice(0, MAX_DIFF_CHARS)}\n\n... (diff truncated)` : diff;
 
     const contextBlock = [
       projectContext && `## Project context\n${projectContext}`,
+      projectConfigContext && `## Project review configuration\n${projectConfigContext}`,
       rulesContext && `## Team review rules\n${rulesContext}`,
       `## Pull request context\nTitle: ${prTitle}${prContext ? `\n${prContext}` : ''}`,
       previousFindingsContext && `## Previous AI review findings\n${previousFindingsContext}`,
@@ -416,7 +582,28 @@ export class AiReviewService {
       .filter(Boolean)
       .join('\n\n');
 
-    const systemPrompt = await this.loadSystemPrompt();
+    const systemPrompt = await this.readPromptFile(REVIEW_SYSTEM_PROMPT_FILE);
+    return this.callGroq(
+      systemPrompt,
+      `${contextBlock}\n\n## Diff\n\`\`\`diff\n${clippedDiff}\n\`\`\``,
+      MAX_COMPLETION_TOKENS,
+    );
+  }
+
+  /**
+   * Raw Groq chat-completion call shared by review generation and repo
+   * analysis: request shape, response extraction (with the reasoning-trace
+   * fallback for reasoning models that can exhaust their budget "thinking"),
+   * degenerate-output rejection, and error mapping all live here once
+   * instead of being duplicated per caller.
+   */
+  private async callGroq(systemPrompt: string, userContent: string, maxTokens: number): Promise<string> {
+    const apiKey = this.env.AI.GROQ_API_KEY;
+    if (!apiKey) {
+      throw new ServiceUnavailableException(
+        'AI review is not configured. Set GROQ_API_KEY in the environment to enable it.',
+      );
+    }
 
     try {
       const { data } = await firstValueFrom(
@@ -424,17 +611,15 @@ export class AiReviewService {
           GROQ_API_URL,
           {
             model: this.env.AI.GROQ_MODEL ?? DEFAULT_MODEL,
-            max_tokens: MAX_COMPLETION_TOKENS,
-            // Low, not zero: keeps output deterministic and exhaustive run to
-            // run (the original complaint was that reruns on the same PR each
-            // surfaced a different single issue instead of the full set) while
+            max_tokens: maxTokens,
+            // Low, not zero: keeps output deterministic run to run while
             // avoiding the degenerate repetition some models fall into at
             // temperature 0.
             temperature: 0.2,
             // gpt-oss-20b occasionally gets stuck restating the same
             // reasoning line dozens of times instead of producing a real
-            // answer, especially on a longer, multi-section prompt like this
-            // one. Penalizing repeated tokens makes that loop less likely to
+            // answer, especially on a longer, multi-section prompt.
+            // Penalizing repeated tokens makes that loop less likely to
             // start in the first place; isDegenerateOutput() below is the
             // backstop for when it happens anyway.
             frequency_penalty: 0.4,
@@ -442,13 +627,12 @@ export class AiReviewService {
             // GPT-OSS is a reasoning model — it spends tokens "thinking" in a
             // separate field before writing the final answer. Without this,
             // a tight max_tokens budget can be fully consumed by reasoning,
-            // leaving message.content empty. A code review doesn't need deep
-            // multi-step reasoning, so keep it minimal and leave the budget
-            // for the actual review text.
+            // leaving message.content empty. Keep it minimal and leave the
+            // budget for the actual output text.
             reasoning_effort: 'low',
             messages: [
               { role: 'system', content: systemPrompt },
-              { role: 'user', content: `${contextBlock}\n\n## Diff\n\`\`\`diff\n${clippedDiff}\n\`\`\`` },
+              { role: 'user', content: userContent },
             ],
           },
           {
@@ -470,7 +654,7 @@ export class AiReviewService {
       }
       if (this.isDegenerateOutput(text)) {
         this.logger.error(
-          `Groq returned a degenerate/repetitive response (${text.length} chars) — rejecting it rather than posting it as a review.`,
+          `Groq returned a degenerate/repetitive response (${text.length} chars) — rejecting it rather than using it.`,
         );
         throw new Error('Degenerate response from Groq');
       }
@@ -478,19 +662,18 @@ export class AiReviewService {
     } catch (err) {
       const error = err as AxiosError<{ error?: { code?: string; type?: string } }>;
       this.logger.error(
-        `Groq review generation failed (status=${error?.response?.status}): ` +
-          `${JSON.stringify(error?.response?.data)?.slice(0, 500)}`,
+        `Groq call failed (status=${error?.response?.status}): ${JSON.stringify(error?.response?.data)?.slice(0, 500)}`,
       );
 
       const groqError = error?.response?.data?.error;
       if (error?.response?.status === 413 || groqError?.code === 'rate_limit_exceeded') {
         throw new BadRequestException(
-          'This pull request is too large for AI review right now (the free-tier AI provider has a ' +
-            'per-minute token limit). Try again in a minute, or use it on a smaller pull request.',
+          'This request is too large for AI processing right now (the free-tier AI provider has a ' +
+            'per-minute token limit). Try again in a minute, or use a smaller input.',
         );
       }
 
-      throw new ServiceUnavailableException('AI review generation failed. Please try again later.');
+      throw new ServiceUnavailableException('AI processing failed. Please try again later.');
     }
   }
 }
