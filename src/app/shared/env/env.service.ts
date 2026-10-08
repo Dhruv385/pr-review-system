@@ -24,6 +24,7 @@ export class EnvService {
   readonly AI: EnvConfig['AI'];
   readonly SECURITY: EnvConfig['SECURITY'];
   readonly SYNC: EnvConfig['SYNC'];
+  readonly INTEGRATIONS: EnvConfig['INTEGRATIONS'];
 
   constructor(private config: ConfigService<EnvConfig, true>) {
     this.APP = this.get('APP');
@@ -36,6 +37,7 @@ export class EnvService {
     this.AI = this.get('AI');
     this.SECURITY = this.get('SECURITY');
     this.SYNC = this.get('SYNC');
+    this.INTEGRATIONS = this.get('INTEGRATIONS');
   }
 
   get NODE_ENV(): string {
