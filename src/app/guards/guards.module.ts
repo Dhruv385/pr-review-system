@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { TokenModule } from '@shared/token/token.module';
 import { JwtAuthGuard } from './jwt';
 import { BasicAuthGuard, BasicStrategy } from './basic';
+import { CiTriggerGuard } from './ci-trigger';
 
 /**
  * Registers the app-wide guards as providers once, so any controller can
@@ -12,7 +13,7 @@ import { BasicAuthGuard, BasicStrategy } from './basic';
 @Global()
 @Module({
   imports: [TokenModule],
-  providers: [JwtAuthGuard, BasicAuthGuard, BasicStrategy],
-  exports: [JwtAuthGuard, BasicAuthGuard, BasicStrategy],
+  providers: [JwtAuthGuard, BasicAuthGuard, BasicStrategy, CiTriggerGuard],
+  exports: [JwtAuthGuard, BasicAuthGuard, BasicStrategy, CiTriggerGuard],
 })
 export class GuardsModule {}

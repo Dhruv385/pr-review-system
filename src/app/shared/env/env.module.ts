@@ -50,6 +50,10 @@ function groupFlatConfig(raw: Record<string, unknown>): Record<string, unknown> 
     SYNC: {
       STALE_MINUTES: raw.PR_SYNC_STALE_MINUTES,
     },
+    INTEGRATIONS: {
+      CI_TRIGGER_SECRET: raw.CI_TRIGGER_SECRET,
+      CI_TRIGGER_USER_ID: raw.CI_TRIGGER_USER_ID,
+    },
   };
 }
 
