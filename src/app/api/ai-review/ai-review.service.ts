@@ -151,9 +151,9 @@ export class AiReviewService {
       this.reviewRules.matchRules(config.rules, files.map((f) => f.filename)),
     );
     const previousFindingsContext = this.formatPreviousFindings(previousReviews);
-    const fullFileContext = headSha
+    const { text: fullFileContext, contents: fullFileContents } = headSha
       ? await this.gatherFullFileContents(accessToken, pr.repositoryFullName, headSha, files)
-      : '';
+      : { text: '', contents: new Map<string, string>() };
 
     const body = await this.generateReview(
       pr.title,
@@ -164,6 +164,7 @@ export class AiReviewService {
       rulesContext,
       previousFindingsContext,
       fullFileContext,
+      fullFileContents,
     );
 
     const posted = await this.githubApi.submitReview(accessToken, pr.repositoryFullName, pr.number, {
@@ -491,13 +492,14 @@ export class AiReviewService {
     fullName: string,
     headSha: string,
     files: GithubPullFile[],
-  ): Promise<string> {
+  ): Promise<{ text: string; contents: Map<string, string> }> {
     const candidates = [...files]
       .filter((f) => f.status !== 'removed')
       .sort((a, b) => a.additions + a.deletions - (b.additions + b.deletions))
       .slice(0, MAX_FULL_FILE_FETCH_COUNT);
 
     const sections: string[] = [];
+    const contents = new Map<string, string>();
     let budgetLeft = MAX_FULL_FILE_CONTEXT_CHARS;
 
     for (const file of candidates) {
@@ -511,13 +513,18 @@ export class AiReviewService {
         });
       if (!content) continue;
 
+      // Keep the raw, unclipped content for fabrication-checking findings
+      // later — what matters there is "does this snippet genuinely exist in
+      // the file", not "was this exact byte range inside the prompt".
+      contents.set(file.filename, content);
+
       const perFileCap = Math.min(MAX_FULL_FILE_CHARS, budgetLeft);
       const clipped = content.length > perFileCap ? `${content.slice(0, perFileCap)}\n... (truncated)` : content;
       sections.push(`### ${file.filename}\n\`\`\`\n${clipped}\n\`\`\``);
       budgetLeft -= clipped.length;
     }
 
-    return sections.join('\n\n');
+    return { text: sections.join('\n\n'), contents };
   }
 
   /**
@@ -557,6 +564,48 @@ export class AiReviewService {
     return mostRepeated >= 8 || mostRepeated / lines.length > 0.3;
   }
 
+  /**
+   * Truncates the diff at whole-file boundaries instead of a blind
+   * character slice. A raw slice can cut a file mid-hunk, or — worse —
+   * drop entire files with no indication of which ones, leaving the model
+   * to guess about files it was never actually shown (this produced real
+   * false positives: files late in the diff, like env.module.ts, fell
+   * entirely outside an 8,000-char window on a 28,000-char diff, and the
+   * model claimed their contents were "missing" instead of staying silent).
+   * Files are kept in their original order; once the running total would
+   * exceed maxChars, every remaining file is omitted and named explicitly
+   * so the model has positive knowledge of what it wasn't shown.
+   */
+  private clipDiffToFileBoundaries(diff: string, maxChars: number): { clipped: string; omittedFiles: string[] } {
+    if (diff.length <= maxChars) return { clipped: diff, omittedFiles: [] };
+
+    const fileDiffs = diff.split(/(?=^diff --git )/m).filter(Boolean);
+    const included: string[] = [];
+    const omittedFiles: string[] = [];
+    let total = 0;
+
+    for (const fileDiff of fileDiffs) {
+      const match = /^diff --git a\/(\S+) b\/(\S+)/.exec(fileDiff);
+      const path = match?.[2] ?? match?.[1] ?? 'unknown file';
+
+      if (total + fileDiff.length <= maxChars) {
+        included.push(fileDiff);
+        total += fileDiff.length;
+      } else {
+        omittedFiles.push(path);
+      }
+    }
+
+    // Degenerate case: even the very first file alone exceeds the budget —
+    // send a partial slice of it rather than nothing at all.
+    if (included.length === 0 && fileDiffs.length > 0) {
+      included.push(fileDiffs[0].slice(0, maxChars));
+      omittedFiles.shift();
+    }
+
+    return { clipped: included.join(''), omittedFiles };
+  }
+
   private async generateReview(
     prTitle: string,
     diff: string,
@@ -566,9 +615,14 @@ export class AiReviewService {
     rulesContext: string,
     previousFindingsContext: string,
     fullFileContext: string,
+    fullFileContents: Map<string, string>,
   ): Promise<string> {
-    const truncated = diff.length > MAX_DIFF_CHARS;
-    const clippedDiff = truncated ? `${diff.slice(0, MAX_DIFF_CHARS)}\n\n... (diff truncated)` : diff;
+    const { clipped, omittedFiles } = this.clipDiffToFileBoundaries(diff, MAX_DIFF_CHARS);
+    const clippedDiff = omittedFiles.length
+      ? `${clipped}\n\n... (diff truncated — the following changed files are NOT shown above, and you have ` +
+        `zero information about their contents. Never claim anything about them, including that something is ` +
+        `missing from them: ${omittedFiles.join(', ')})`
+      : clipped;
 
     const contextBlock = [
       projectContext && `## Project context\n${projectContext}`,
@@ -583,11 +637,55 @@ export class AiReviewService {
       .join('\n\n');
 
     const systemPrompt = await this.readPromptFile(REVIEW_SYSTEM_PROMPT_FILE);
-    return this.callGroq(
+    const text = await this.callGroq(
       systemPrompt,
       `${contextBlock}\n\n## Diff\n\`\`\`diff\n${clippedDiff}\n\`\`\``,
       MAX_COMPLETION_TOKENS,
     );
+
+    // The model doesn't reliably follow prompt-only grounding instructions
+    // on its own — confirmed directly: given a file's exact, complete,
+    // ground-truth content via "## Full file contents" (contradicting its
+    // claim), it still fabricated the same false finding anyway. Prompting
+    // alone isn't enough here, so this is a deterministic backstop rather
+    // than another instruction to hope it follows: for a file we have no
+    // information on at all, strip any finding naming it outright; for a
+    // file we *do* have full content for, strip the finding unless its
+    // quoted "Current code" snippet genuinely appears in that content.
+    return this.stripUnverifiableFindings(text, omittedFiles, fullFileContents);
+  }
+
+  /**
+   * Deterministic backstop for ungrounded findings — see the comment at the
+   * call site above for why this can't just be another prompt instruction.
+   */
+  private stripUnverifiableFindings(
+    reviewBody: string,
+    omittedFiles: string[],
+    fullFileContents: Map<string, string>,
+  ): string {
+    const omittedSet = new Set(omittedFiles);
+    const blocks = reviewBody.split(/(?=^### )/m);
+
+    const kept = blocks.filter((block) => {
+      const fileMatch = /\*\*File:\*\*\s*`([^`]+)`/.exec(block);
+      if (!fileMatch) return true; // not a finding block (verdict/intro text) — keep
+      const filePath = fileMatch[1];
+
+      if (omittedSet.has(filePath)) return false; // never shown this file at all — can't be real
+
+      const fullContent = fullFileContents.get(filePath);
+      if (fullContent === undefined) return true; // diff-only file, nothing further to verify here
+
+      const codeMatch = /\*\*Current code:\*\*\s*```[a-zA-Z]*\n([\s\S]*?)```/.exec(block);
+      if (!codeMatch) return true; // no quoted snippet to check against ground truth
+
+      const snippet = codeMatch[1].trim();
+      return snippet.length === 0 || fullContent.includes(snippet);
+    });
+
+    const result = kept.join('').trim();
+    return result || 'No reviewable findings — too much of this diff was outside the available context to review it meaningfully.';
   }
 
   /**
