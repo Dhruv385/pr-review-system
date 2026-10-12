@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { EnvService } from '@shared/env';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -45,6 +45,19 @@ export class GithubAuthService {
 
     // Verify the token by calling GitHub with it — this is the "verified account" step.
     const verifiedUser = await this.githubApi.getAuthenticatedUser(accessToken);
+    const githubId = String(verifiedUser.id);
+
+    // upsert() below only keys off userId, so it can't see a conflict on the
+    // *other* unique column (githubId) until Postgres rejects the insert —
+    // check explicitly first so a real conflict gets an actionable message
+    // instead of a raw "record already exists".
+    const existing = await this.prisma.githubAccount.findUnique({ where: { githubId } });
+    if (existing && existing.userId !== userId) {
+      throw new ConflictException(
+        'This GitHub account is already connected to a different pr-review-system account. ' +
+          'Log in as that account to manage the connection, or authorize with a different GitHub account.',
+      );
+    }
 
     const encryptedToken = this.crypto.encrypt(accessToken);
 
@@ -52,12 +65,12 @@ export class GithubAuthService {
       where: { userId },
       create: {
         userId,
-        githubId: String(verifiedUser.id),
+        githubId,
         username: verifiedUser.login,
         accessToken: encryptedToken,
       },
       update: {
-        githubId: String(verifiedUser.id),
+        githubId,
         username: verifiedUser.login,
         accessToken: encryptedToken,
         tokenRevoked: false,

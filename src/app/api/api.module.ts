@@ -7,6 +7,7 @@ import { PullRequestsModule } from './pull-requests/pull-requests.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { AiReviewModule } from './ai-review/ai-review.module';
 import { SyncModule } from './sync/sync.module';
+import { IntegrationsModule } from './integrations/integrations.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { SyncModule } from './sync/sync.module';
     ReviewsModule,
     AiReviewModule,
     SyncModule,
+    IntegrationsModule,
   ],
 })
 export class ApiModule {}

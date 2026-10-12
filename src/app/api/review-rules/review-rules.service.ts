@@ -59,7 +59,7 @@ export class ReviewRulesService {
     const row = await this.prisma.reviewRule.findUnique({
       where: { userId_repositoryFullName: { userId, repositoryFullName } },
     });
-    return this.parseRules(JSON.stringify(row?.rules ?? []));
+    return this.parseRules(row?.rules ?? []);
   }
 
   /** Full structured config for a (user, repo) — architecture/conventions/focus/exclusions plus the existing rule list. */
@@ -72,7 +72,7 @@ export class ReviewRulesService {
       conventions: row?.conventions ?? null,
       focusAreas: this.parseStringArray(row?.focusAreas),
       excludePatterns: this.parseStringArray(row?.excludePatterns),
-      rules: this.parseRules(JSON.stringify(row?.rules ?? [])),
+      rules: this.parseRules(row?.rules ?? []),
     };
   }
 
@@ -153,7 +153,7 @@ export class ReviewRulesService {
     const existing = await this.prisma.reviewRule.findUnique({
       where: { userId_repositoryFullName: { userId, repositoryFullName } },
     });
-    const rules = this.parseRules(JSON.stringify(existing?.rules ?? []));
+    const rules = this.parseRules(existing?.rules ?? []);
 
     const rule: ReviewRule = {
       id: randomUUID().slice(0, 8),

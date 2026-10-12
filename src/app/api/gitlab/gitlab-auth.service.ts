@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger } from '@nestjs/common';
 import { EnvService } from '@shared/env';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
@@ -31,18 +31,32 @@ export class GitlabAuthService {
   async connectAccount(userId: string, code: string): Promise<{ username: string }> {
     const accessToken = await this.exchangeCodeForToken(code);
     const verifiedUser = await this.gitlabApi.getAuthenticatedUser(accessToken);
+    const gitlabId = String(verifiedUser.id);
+
+    // upsert() below only keys off userId, so it can't see a conflict on the
+    // *other* unique column (gitlabId) until Postgres rejects the insert —
+    // check explicitly first so a real conflict gets an actionable message
+    // instead of a raw "record already exists".
+    const existing = await this.prisma.gitlabAccount.findUnique({ where: { gitlabId } });
+    if (existing && existing.userId !== userId) {
+      throw new ConflictException(
+        'This GitLab account is already connected to a different pr-review-system account. ' +
+          'Log in as that account to manage the connection, or authorize with a different GitLab account.',
+      );
+    }
+
     const encryptedToken = this.crypto.encrypt(accessToken);
 
     await this.prisma.gitlabAccount.upsert({
       where: { userId },
       create: {
         userId,
-        gitlabId: String(verifiedUser.id),
+        gitlabId,
         username: verifiedUser.username,
         accessToken: encryptedToken,
       },
       update: {
-        gitlabId: String(verifiedUser.id),
+        gitlabId,
         username: verifiedUser.username,
         accessToken: encryptedToken,
         tokenRevoked: false,

@@ -11,6 +11,7 @@ import { GitlabConfig } from './gitlab.config';
 import { AiConfig } from './ai.config';
 import { SecurityConfig } from './security.config';
 import { SyncConfig } from './sync.config';
+import { IntegrationsConfig } from './integrations.config';
 
 export { AppConfig } from './app.config';
 export { DatabaseConfig } from './database.config';
@@ -22,6 +23,7 @@ export { GitlabConfig } from './gitlab.config';
 export { AiConfig } from './ai.config';
 export { SecurityConfig } from './security.config';
 export { SyncConfig } from './sync.config';
+export { IntegrationsConfig } from './integrations.config';
 
 /**
  * Full shape of validated, typed environment configuration. Built by
@@ -88,4 +90,10 @@ export class EnvConfig {
   @ValidateNested()
   @Type(() => SyncConfig)
   SYNC!: SyncConfig;
+
+  @IsDefined()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => IntegrationsConfig)
+  INTEGRATIONS!: IntegrationsConfig;
 }
